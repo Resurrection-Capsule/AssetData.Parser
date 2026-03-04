@@ -20,4 +20,13 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="../Assets/registries/reg_type.txt">
+      <LogicalName>AssetData.Parser.Registries.reg_type.txt</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="../Assets/registries/reg_file.txt">
+      <LogicalName>AssetData.Parser.Registries.reg_file.txt</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>

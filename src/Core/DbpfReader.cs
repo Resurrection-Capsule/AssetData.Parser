@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Text;
 
 namespace AssetData.Parser;
@@ -28,10 +29,15 @@ public sealed class DbpfReader : IDisposable
     
     public IReadOnlyList<DbpfEntry> Entries => _entries;
     
+    /// <summary>Optional logger. Set before opening a package for boot-time diagnostics.</summary>
+    public Action<string>? Logger { get; set; }
+
     public DbpfReader(string path)
     {
         _stream = File.OpenRead(path);
         _reader = new BinaryReader(_stream);
+
+        LoadEmbeddedRegistries();
         
         // Read header
         uint magic = _reader.ReadUInt32();
@@ -101,6 +107,29 @@ public sealed class DbpfReader : IDisposable
         );
     }
     
+    private void LoadEmbeddedRegistries()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var map = new (string Resource, NameRegistry Registry)[]
+        {
+            ("AssetData.Parser.Registries.reg_type.txt", _typeRegistry),
+            ("AssetData.Parser.Registries.reg_file.txt", _fileRegistry),
+        };
+
+        foreach (var (resName, registry) in map)
+        {
+            using var stream = asm.GetManifestResourceStream(resName);
+            if (stream == null)
+            {
+                Logger?.Invoke($"[DbpfReader] WARN: embedded registry '{resName}' nao encontrado.");
+                continue;
+            }
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            registry.LoadFromString(reader.ReadToEnd());
+            Logger?.Invoke($"[DbpfReader] Registry '{resName}' carregado.");
+        }
+    }
+
     private void LoadInternalNames()
     {
         uint sporemasterGroup = FnvHash("sporemaster");
@@ -413,23 +442,34 @@ internal sealed class NameRegistry
         foreach (var line in content.Split('\n', '\r'))
         {
             var trimmed = line.Trim();
-            
-            // Remove comments
+
             var commentIdx = trimmed.IndexOf("//");
             if (commentIdx >= 0) trimmed = trimmed[..commentIdx].Trim();
             if (string.IsNullOrEmpty(trimmed)) continue;
-            
-            // Parse "name hash"
+            if (trimmed[0] == '#') continue;
+
             var parts = trimmed.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+
+            string name;
+            uint hash;
+
             if (parts.Length >= 2)
             {
-                string name = parts[0];
-                uint hash = ParseHash(parts[1]);
-                Add(name, hash);
+                name = parts[0];
+                hash = ParseHash(parts[1]);
             }
+            else
+            {
+                var raw = parts[0];
+                var stripped = (raw.StartsWith("$") || raw.StartsWith("%")) ? raw[1..] : raw;
+                name = stripped;
+                hash = DbpfReader.FnvHash(stripped);
+            }
+
+            Add(name, hash);
         }
     }
-    
+
     private static uint ParseHash(string s)
     {
         s = s.Trim();
