@@ -1,0 +1,42 @@
+name: Publish NuGet Package
+
+on:
+  push:
+    tags:
+      - "v*.*.*" # Push events to matching v*, i.e. v1.0, v20.15.10
+  workflow_dispatch: # Enable running manually from the Actions tab
+
+jobs:
+  build_and_publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x' # Ensure this matches your TargetFramework
+          source-url: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json # We configure both to allow public or private
+        env:
+          NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Restore dependencies
+        run: dotnet restore ./src/Core/AssetData.Parser.csproj
+
+      - name: Build
+        run: dotnet build ./src/Core/AssetData.Parser.csproj --configuration Release --no-restore
+
+      - name: Pack
+        run: dotnet pack ./src/Core/AssetData.Parser.csproj --configuration Release --no-build --output nupkgs
+
+      # Option 1: Publish to NuGet.org
+      # Run this step if NUGET_API_KEY is configured in repository secrets
+      - name: Push to NuGet.org
+        run: dotnet nuget push nupkgs/*.nupkg -k ${{ secrets.NUGET_API_KEY }} -s https://api.nuget.org/v3/index.json --skip-duplicate
+
+      # Option 2: Publish to GitHub Packages
+      # Run this step to publish to GitHub Packages (requires repository GITHUB_TOKEN which is automatically provided)
+      - name: Push to GitHub Packages
+        run: dotnet nuget push nupkgs/*.nupkg -k ${{ secrets.GITHUB_TOKEN }} -s https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json --skip-duplicate
