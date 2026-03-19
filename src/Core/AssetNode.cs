@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace AssetData.Parser;
@@ -49,6 +50,12 @@ public abstract class AssetNode : INotifyPropertyChanged
         Children.Add(child);
     }
     
+    public AssetNode? this[string name] =>
+        Children.FirstOrDefault(c => c.Name == name);
+
+    public IEnumerable<AssetNode> Elements =>
+        this is ArrayNode ? Children : Enumerable.Empty<AssetNode>();
+
     public event PropertyChangedEventHandler? PropertyChanged;
     
     protected void OnPropertyChanged([CallerMemberName] string? name = null)

@@ -11,7 +11,7 @@ public sealed class labsPlayer : AssetCatalog
             IStruct("mCharacters", "labsCharacter", 0x18), // cLabsCharacter
             Field("mPlayerIndex", DataType.UInt8, 0x1278),
             Field("mTeam", DataType.UInt8, 0x12dc),
-            Field("mPlayerOnlineId", DataType.UInt8, 0x1280),
+            Field("mPlayerOnlineId", DataType.UInt64, 0x1280),
             Field("mStatus", DataType.UInt32, 0x4),
             Field("mStatusProgress", DataType.Float, 0x8),
             Field("mCurrentCreatureId", DataType.ObjId, 0x12e0),
