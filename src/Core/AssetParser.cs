@@ -60,8 +60,17 @@ public sealed class AssetParser
     private readonly Dictionary<string, StructDefinition> _globalStructs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, EnumDefinition> _globalEnums = new(StringComparer.OrdinalIgnoreCase);
 
+    private TypeRegistry _registry = null!;
+
     private byte[] _data = null!;
     private BlobReader _blob = null!;
+
+    /// <summary>Hash-keyed type registry (Phase 1, game-faithful model). Built alongside the
+    /// legacy struct dictionary; the deserializer still uses the legacy path until Phase 1b.</summary>
+    public TypeRegistry Registry => _registry;
+
+    /// <summary>Unresolved struct references found while building <see cref="Registry"/> (should be empty).</summary>
+    public IReadOnlyList<string> RegistryIssues { get; private set; } = [];
     
     /// <summary>Enable console logging for debugging.</summary>
     public bool EnableLogging { get; set; }
@@ -103,6 +112,12 @@ public sealed class AssetParser
             MergeCatalog(catalog);
         }
         ResolveEnumReferences();
+
+        // Phase 1a: build the hash-keyed registry from the (now fully merged + enum-resolved)
+        // legacy structs. Additive — does not affect parsing yet.
+        var build = RegistryBuilder.Build(_globalStructs);
+        _registry = build.Registry;
+        RegistryIssues = build.Issues;
     }
 
     private void ResolveEnumReferences()
@@ -159,33 +174,12 @@ public sealed class AssetParser
 
     private void MergeCatalog(AssetCatalog catalog)
     {
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        
-        var structs = typeof(AssetCatalog)
-            .GetField("_structs", flags)
-            ?.GetValue(catalog) as Dictionary<string, StructDefinition>;
-        
-        var enums = typeof(AssetCatalog)
-            .GetField("_enums", flags)
-            ?.GetValue(catalog) as Dictionary<string, EnumDefinition>;
+        // First-wins merge via explicit accessors (was private-field reflection, D6).
+        foreach (var kvp in catalog.Structs)
+            _globalStructs.TryAdd(kvp.Key, kvp.Value);
 
-        if (structs != null)
-        {
-            foreach (var kvp in structs)
-            {
-                if (!_globalStructs.ContainsKey(kvp.Key))
-                    _globalStructs[kvp.Key] = kvp.Value;
-            }
-        }
-        
-        if (enums != null)
-        {
-            foreach (var kvp in enums)
-            {
-                if (!_globalEnums.ContainsKey(kvp.Key))
-                    _globalEnums[kvp.Key] = kvp.Value;
-            }
-        }
+        foreach (var kvp in catalog.Enums)
+            _globalEnums.TryAdd(kvp.Key, kvp.Value);
     }
 
     /// <summary>
@@ -247,36 +241,48 @@ public sealed class AssetParser
     {
         try
         {
-            return field.Type switch
+            // Game-faithful dispatch (mirrors AssetParser::DeserializeObject 0x009cd2c0):
+            // the field's type hash either resolves to a registered struct (recurse) or is a
+            // sentinel / value-type handled inline. Inline structs (legacy DataType.Struct)
+            // carry their element name as the hash source — this is the D2 fix: no fabricated
+            // sentinel, just "FindTypeByHash returned a type ⇒ recurse", the game's first check.
+            uint typeHash = field.Type == DataType.Struct
+                ? WireHash.Fnv1a(field.ElementType!)
+                : (uint)field.Type;
+
+            if (_registry.FindTypeByHash(typeHash) is not null)
+                return ParseInlineStructField(field, offset);
+
+            return typeHash switch
             {
                 // ═══════════════════════════════════════════════════════════
                 // Primitives
                 // ═══════════════════════════════════════════════════════════
-                
-                DataType.Bool => new BooleanNode
+
+                WireHash.Bool => new BooleanNode
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset) != 0,
                     BinaryOffset = offset
                 },
-                
-                DataType.Int or DataType.Int32 => new NumberNode
+
+                WireHash.Int or WireHash.Int32 => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadInt32(offset),
                     OriginalType = NumericType.Int32,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt32 => new NumberNode
+
+                WireHash.UInt32 => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset),
                     OriginalType = NumericType.UInt32,
                     BinaryOffset = offset
                 },
-                
-                DataType.HashId => new NumberNode
+
+                WireHash.HashId => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset),
@@ -284,8 +290,8 @@ public sealed class AssetParser
                     Format = NumberFormat.Hex,
                     BinaryOffset = offset
                 },
-                
-                DataType.ObjId => new NumberNode
+
+                WireHash.ObjId => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset),
@@ -293,24 +299,24 @@ public sealed class AssetParser
                     Format = NumberFormat.Hex,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt16 => new NumberNode
+
+                WireHash.UInt16 => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadUInt16(offset),
                     OriginalType = NumericType.UInt16,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt8 => new NumberNode
+
+                WireHash.UInt8 => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadUInt8(offset),
                     OriginalType = NumericType.UInt8,
                     BinaryOffset = offset
                 },
-                
-                DataType.Float => new NumberNode
+
+                WireHash.Float => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadFloat(offset),
@@ -318,30 +324,30 @@ public sealed class AssetParser
                     Format = NumberFormat.Float,
                     BinaryOffset = offset
                 },
-                
-                DataType.Int64 => new NumberNode
+
+                WireHash.Int64 => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadInt64(offset),
                     OriginalType = NumericType.Int64,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt64 => new NumberNode
+
+                WireHash.UInt64 => new NumberNode
                 {
                     Name = field.Name,
                     Value = ReadUInt64(offset),
                     OriginalType = NumericType.UInt64,
                     BinaryOffset = offset
                 },
-                
-                DataType.Enum => ParseEnumField(field, offset),
-                
+
+                WireHash.Enum => ParseEnumField(field, offset),
+
                 // ═══════════════════════════════════════════════════════════
                 // Vectors
                 // ═══════════════════════════════════════════════════════════
-                
-                DataType.Vector2 => new VectorNode
+
+                WireHash.Vector2 => new VectorNode
                 {
                     Name = field.Name,
                     VectorType = VectorType.Vector2,
@@ -349,8 +355,8 @@ public sealed class AssetParser
                     Y = ReadFloat(offset + 4),
                     BinaryOffset = offset
                 },
-                
-                DataType.Vector3 => new VectorNode
+
+                WireHash.Vector3 => new VectorNode
                 {
                     Name = field.Name,
                     VectorType = VectorType.Vector3,
@@ -359,8 +365,8 @@ public sealed class AssetParser
                     Z = ReadFloat(offset + 8),
                     BinaryOffset = offset
                 },
-                
-                DataType.Vector4 => new VectorNode
+
+                WireHash.Vector4 => new VectorNode
                 {
                     Name = field.Name,
                     VectorType = VectorType.Vector4,
@@ -370,9 +376,9 @@ public sealed class AssetParser
                     W = ReadFloat(offset + 12),
                     BinaryOffset = offset
                 },
-                
+
                 // Orientation is stored as XYZW quaternion
-                DataType.Orientation => new VectorNode
+                WireHash.Orientation => new VectorNode
                 {
                     Name = field.Name,
                     VectorType = VectorType.Orientation,
@@ -382,26 +388,24 @@ public sealed class AssetParser
                     W = ReadFloat(offset + 12),
                     BinaryOffset = offset
                 },
-                
+
                 // ═══════════════════════════════════════════════════════════
                 // Dynamic types
                 // ═══════════════════════════════════════════════════════════
-                
-                DataType.Key => ParseKeyField(field, offset),
-                DataType.Char => ParseCharField(field, offset),
-                DataType.CharPtr => ParseCharPtrField(field, offset),
-                DataType.Asset => ParseAssetField(field, offset),
-                DataType.cLocalizedAssetString => ParseLocalizedAssetStringField(field, offset),
+
+                WireHash.Key => ParseKeyField(field, offset),
+                WireHash.Char => ParseCharField(field, offset),
+                WireHash.CharPtr => ParseCharPtrField(field, offset),
+                WireHash.Asset => ParseAssetField(field, offset),
+                WireHash.LocalizedAssetString => ParseLocalizedAssetStringField(field, offset),
 
                 // ═══════════════════════════════════════════════════════════
                 // Containers
                 // ═══════════════════════════════════════════════════════════
-                
-                DataType.Array => ParseArrayField(field, offset),
-                DataType.Nullable => ParseNullableField(field, offset),
-                DataType.Struct => ParseInlineStructField(field, offset),
-                DataType.AssetPropertyVector => ParseAssetPropertyVectorField(field, offset),
-                
+
+                WireHash.Array => ParseArrayField(field, offset),
+                WireHash.Nullable => ParseNullableField(field, offset),
+
                 _ => null
             };
         }
@@ -652,99 +656,6 @@ public sealed class AssetParser
         }
         
         return arrayNode;
-    }
-    
-    private AssetNode ParseAssetPropertyVectorField(FieldDefinition field, int offset)
-    {
-        // Read count and pointer from header
-        int count = ReadInt32(offset);
-        uint dataPointer = ReadUInt32(offset + 4);
-        
-        var arrayNode = new ArrayNode
-        {
-            Name = field.Name,
-            ElementType = "AssetProperty",
-            BinaryOffset = offset
-        };
-        
-        if (count <= 0 || dataPointer == 0)
-            return arrayNode;
-        
-        // Reserve blob space for array
-        // Each AssetProperty item is 188 bytes (0xBC)
-        const int ITEM_SIZE = 188;
-        int arrayStart = _blob.ReserveArray(ITEM_SIZE, count);
-        
-        // Parse each AssetProperty struct
-        for (int i = 0; i < count; i++)
-        {
-            int itemOffset = arrayStart + (i * ITEM_SIZE);
-            var item = ParseAssetPropertyItem(i, itemOffset);
-            arrayNode.AddChild(item);
-        }
-        
-        return arrayNode;
-    }
-    
-    private StructNode ParseAssetPropertyItem(int index, int offset)
-    {
-        var item = new StructNode
-        {
-            Name = $"[{index}]",
-            TypeName = "AssetProperty",
-            BinaryOffset = offset
-        };
-        
-        // Parse 4-byte header fields (16 bytes total)
-        item.AddChild(new NumberNode
-        {
-            Name = "NameHash",
-            Value = ReadUInt32(offset),
-            OriginalType = NumericType.HashId,
-            Format = NumberFormat.Hex,
-            BinaryOffset = offset
-        });
-        
-        item.AddChild(new NumberNode
-        {
-            Name = "TypeHash",
-            Value = ReadUInt32(offset + 4),
-            OriginalType = NumericType.HashId,
-            Format = NumberFormat.Hex,
-            BinaryOffset = offset + 4
-        });
-        
-        item.AddChild(new NumberNode
-        {
-            Name = "ValueOffset",
-            Value = ReadUInt32(offset + 8),
-            OriginalType = NumericType.UInt32,
-            BinaryOffset = offset + 8
-        });
-        
-        item.AddChild(new NumberNode
-        {
-            Name = "Flags",
-            Value = ReadUInt32(offset + 12),
-            OriginalType = NumericType.UInt32,
-            Format = NumberFormat.Hex,
-            BinaryOffset = offset + 12
-        });
-        
-        // Read 172 bytes of variant data
-        // TODO: This could be interpreted based on TypeHash
-        // For now, display as hex dump for debugging
-        var dataBytes = new byte[172];
-        Array.Copy(_data, offset + 16, dataBytes, 0, 172);
-        
-        item.AddChild(new StringNode
-        {
-            Name = "VariantData",
-            Value = $"[{dataBytes.Length} bytes]",
-            BinaryOffset = offset + 16
-        });
-        
-        return item;
     }
     
     private AssetNode? ParseNullableField(FieldDefinition field, int offset)

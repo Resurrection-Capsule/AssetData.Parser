@@ -421,8 +421,20 @@ public static partial class Program
         }
         
         var service = new AssetService();
+
+        if (verbose)
+        {
+            var reg = service.Parser.Registry;
+            var issues = service.Parser.RegistryIssues;
+            Console.ForegroundColor = issues.Count == 0 ? ConsoleColor.DarkGray : ConsoleColor.DarkRed;
+            Console.WriteLine($"    Registry: {reg.Count} types, {issues.Count} unresolved ref(s)");
+            foreach (var issue in issues)
+                Console.WriteLine($"      - {issue}");
+            Console.ResetColor();
+        }
+
         var fileType = service.GetFileType(typeName);
-        
+
         if (fileType == null)
         {
             Console.Error.WriteLine($"Error: Unknown asset type: {typeName}");
