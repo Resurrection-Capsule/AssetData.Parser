@@ -36,7 +36,7 @@ public sealed class cLabsMarker : AssetCatalog
             NStruct("mapCameraData", "cMapCameraData", 0x8c),
             NStruct("occluderData", "cOccluderData", 0x90),
             NStruct("splineCameraData", "cSplineCameraData", 0x94),
-            NStruct("splineCameraNodeData", "cSplineCameraNodeData", 0x98),
+            NStruct("splineCameraNodeData", "cSplineCameraNodeBaseData", 0x98),
             NStruct("volumeDef", "cVolumeDef", 0x58),
             Field("ignoreOnXBox", DataType.Bool, 0x50),
             Field("ignoreOnMinSpec", DataType.Bool, 0x51),
