@@ -18,7 +18,7 @@ public sealed class labsPlayer : AssetCatalog
             Field("mEnergyPoints", DataType.Float, 0x12e4),
             Field("mbIsCharged", DataType.Bool, 0x12ec),
             Field("mDNA", DataType.Int, 0x12f0),
-            IStruct("mCrystals", "cPlayerCrystal", 0x133c),
+            IStruct("mCrystals", "labsCrystal", 0x133c),
             Field("mCrystalBonuses", DataType.Bool, 0x13cc),
             Field("mAvatarLevel", DataType.UInt32, 0x12fc),
             Field("mAvatarXP", DataType.Float, 0x12f8),
