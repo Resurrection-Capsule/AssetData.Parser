@@ -174,7 +174,16 @@ public static class Program
         sb.AppendLine();
         
         sb.AppendLine("## Base");
-        sb.AppendLine("* **[Home](https://github.com/JeanxPereira/AssetData.Parser/wiki/Home )**");
+        sb.AppendLine("* **[[Home]]**");
+        sb.AppendLine("* [[Getting Started]]");
+        sb.AppendLine();
+
+        sb.AppendLine("## Guides");
+        sb.AppendLine("* [[Asset System]]");
+        sb.AppendLine("* [[Binary Format]]");
+        sb.AppendLine("* [[Parser Architecture]]");
+        sb.AppendLine("* [[Adding a Format]]");
+        sb.AppendLine("* [[Catalog Reference]]");
         sb.AppendLine();
 
         sb.AppendLine("## Catalog Assets");

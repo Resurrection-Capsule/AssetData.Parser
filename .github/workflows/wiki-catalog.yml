@@ -49,8 +49,11 @@ jobs:
           set -euo pipefail
           git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
 
+          # Sync the generated catalog and sidebar. Hand-authored pages in the
+          # wiki (Home and the Guides) are left untouched.
           rm -rf wiki/Catalog
           cp -r wiki_content/Catalog wiki/
+          cp wiki_content/_Sidebar.md wiki/
 
           cd wiki
           git config user.name "github-actions[bot]"
