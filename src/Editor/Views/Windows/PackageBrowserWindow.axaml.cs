@@ -3,6 +3,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using AssetData.Parser;
+using AssetData.Parser.Editor.Models;
 using AssetData.Parser.Editor.Services;
 using AssetData.Parser.Editor.ViewModels;
 
@@ -25,7 +26,7 @@ public partial class PackageBrowserWindow : Window
     /// <summary>
     /// Event raised when an asset is opened from the package.
     /// </summary>
-    public event Action<AssetNode, string>? AssetOpened;
+    public event Action<EditorNode, string>? AssetOpened;
     
     protected override void OnLoaded(RoutedEventArgs e)
     {
@@ -48,7 +49,7 @@ public partial class PackageBrowserWindow : Window
         }
     }
     
-    private void OnAssetOpened(AssetNode root, string name)
+    private void OnAssetOpened(EditorNode root, string name)
     {
         AssetOpened?.Invoke(root, name);
     }

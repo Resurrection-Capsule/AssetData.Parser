@@ -11,6 +11,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
 using AssetData.Parser;
+using AssetData.Parser.Editor.Models;
 using AssetData.Parser.Editor.Services;
 using AssetData.Parser.Editor.ViewModels;
 using AssetData.Parser.Editor.Views.Windows;
@@ -69,7 +70,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SelectAndRevealNode(AssetNode node)
+    private void SelectAndRevealNode(EditorNode node)
     {
         var tv = this.FindControl<TreeView>("Tree");
         if (tv == null) return;
@@ -82,12 +83,12 @@ public partial class MainWindow : Window
         container?.BringIntoView();
     }
 
-    private void ExpandPath(AssetNode node)
+    private void ExpandPath(EditorNode node)
     {
         var tv = this.FindControl<TreeView>("Tree");
         if (tv == null) return;
         
-        var stack = new Stack<AssetNode>();
+        var stack = new Stack<EditorNode>();
         var parent = node.Parent;
         while (parent != null)
         {
@@ -240,7 +241,7 @@ public partial class MainWindow : Window
     {
         if (ViewModel != null && sender is TreeView tv)
         {
-            ViewModel.Selected = tv.SelectedItem as AssetNode;
+            ViewModel.Selected = tv.SelectedItem as EditorNode;
         }
     }
 
@@ -312,7 +313,7 @@ public partial class MainWindow : Window
         _packageBrowser.Activate();
     }
     
-    private void OnPackageAssetOpened(AssetNode root, string assetName)
+    private void OnPackageAssetOpened(EditorNode root, string assetName)
     {
         if (ViewModel == null) return;
         

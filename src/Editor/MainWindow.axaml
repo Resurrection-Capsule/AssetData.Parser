@@ -1,7 +1,7 @@
 <!-- src/AssetData.Parser.Editor/MainWindow.axaml -->
 <Window xmlns="https://github.com/avaloniaui" 
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:core="clr-namespace:AssetData.Parser;assembly=AssetData.Parser.Core"
+        xmlns:models="clr-namespace:AssetData.Parser.Editor.Models"
         xmlns:vm="clr-namespace:AssetData.Parser.Editor.ViewModels"
         xmlns:panels="clr-namespace:AssetData.Parser.Editor.Views.Panels"
         xmlns:local="clr-namespace:AssetData.Parser.Editor"
@@ -18,7 +18,7 @@
 
   <Window.DataTemplates>
     <!-- String/Asset Value Editor -->
-    <DataTemplate DataType="core:StringNode">
+    <DataTemplate DataType="models:StringNode">
       <ComboBox IsEditable="True"
         Text="{Binding Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
         ItemsSource="{Binding DataContext.KeyAssetSuggestions, RelativeSource={RelativeSource AncestorType=Window}}"
@@ -26,20 +26,20 @@
     </DataTemplate>
     
     <!-- Number Value Editor -->
-    <DataTemplate DataType="core:NumberNode">
+    <DataTemplate DataType="models:NumberNode">
       <NumericUpDown Value="{Binding Value, Mode=TwoWay}" 
         BorderThickness="0" Padding="0"
         HorizontalAlignment="Left" VerticalAlignment="Center" Width="160" />
     </DataTemplate>
     
     <!-- Boolean Value Editor -->
-    <DataTemplate DataType="core:BooleanNode">
+    <DataTemplate DataType="models:BooleanNode">
       <CheckBox IsChecked="{Binding Value, Mode=TwoWay}" 
         HorizontalAlignment="Left" VerticalAlignment="Center" />
     </DataTemplate>
     
     <!-- Vector Value Editor (Vector2/3/4/Orientation) -->
-    <DataTemplate DataType="core:VectorNode">
+    <DataTemplate DataType="models:VectorNode">
       <StackPanel Orientation="Horizontal" Spacing="8">
         <StackPanel Orientation="Horizontal" Spacing="2">
           <TextBlock Text="X:" VerticalAlignment="Center" Opacity="0.6" />
@@ -74,25 +74,25 @@
     </DataTemplate>
     
     <!-- Enum Value Display (read-only for now, could add ComboBox) -->
-    <DataTemplate DataType="core:EnumNode">
+    <DataTemplate DataType="models:EnumNode">
       <TextBlock Text="{Binding DisplayValue}" 
         VerticalAlignment="Center" Opacity="0.9" />
     </DataTemplate>
     
     <!-- Struct Container (no value editor) -->
-    <DataTemplate DataType="core:StructNode">
+    <DataTemplate DataType="models:StructNode">
       <TextBlock Text="{Binding DisplayValue}" 
         VerticalAlignment="Center" Opacity="0.6" FontStyle="Italic" />
     </DataTemplate>
     
     <!-- Array Container (shows count) -->
-    <DataTemplate DataType="core:ArrayNode">
+    <DataTemplate DataType="models:ArrayNode">
       <TextBlock Text="{Binding DisplayValue}" 
         VerticalAlignment="Center" Opacity="0.6" FontStyle="Italic" />
     </DataTemplate>
     
     <!-- Null Value Display -->
-    <DataTemplate DataType="core:NullNode">
+    <DataTemplate DataType="models:NullNode">
       <TextBlock Text="(null)" 
         VerticalAlignment="Center" Opacity="0.4" FontStyle="Italic" />
     </DataTemplate>
@@ -207,7 +207,7 @@
         
         <!-- Tree Item Template - binds to AssetNode from Core -->
         <TreeView.ItemTemplate>
-          <TreeDataTemplate DataType="core:AssetNode" ItemsSource="{Binding Children}">
+          <TreeDataTemplate DataType="models:EditorNode" ItemsSource="{Binding Children}">
             <Border BorderBrush="#303030" BorderThickness="0,0,0,1">
               <Grid HorizontalAlignment="Stretch">
                 <Grid.ColumnDefinitions>

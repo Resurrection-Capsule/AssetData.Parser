@@ -1,95 +1,128 @@
 using System.Globalization;
 using System.Xml.Linq;
+using AssetData.Parser.Model;
 
 namespace AssetData.Parser;
 
 /// <summary>
-/// Serializes AssetNode trees to various formats.
+/// Serializes L1 <see cref="AssetValue"/> trees to XML for export/round-trip. Pure transformation
+/// on the lean tree; no editor concerns. (The editor-side XAML round-trip lives in the Editor.)
 /// </summary>
 public static class AssetSerializer
 {
-    /// <summary>
-    /// Serialize an AssetNode tree to XDocument (for compatibility/export).
-    /// </summary>
-    public static XDocument ToXml(AssetNode root)
+    public static XDocument ToXml(AssetValue root)
     {
         var doc = new XDocument();
-        var element = SerializeNode(root);
-        doc.Add(element);
+        doc.Add(SerializeNode(root));
         return doc;
     }
-    
-    /// <summary>
-    /// Serialize an AssetNode tree to XML string.
-    /// </summary>
-    public static string ToXmlString(AssetNode root, bool indent = true)
+
+    public static string ToXmlString(AssetValue root, bool indent = true)
     {
         var doc = ToXml(root);
         return doc.ToString(indent ? SaveOptions.None : SaveOptions.DisableFormatting);
     }
-    
-    private static XElement SerializeNode(AssetNode node)
+
+    private static XElement SerializeNode(AssetValue node)
     {
         var element = new XElement(SanitizeName(node.Name));
-        
+
         switch (node)
         {
-            case StructNode structNode:
-                foreach (var child in structNode.Children)
-                    element.Add(SerializeNode(child));
+            case StructValue s:
+                foreach (var field in s.Children)
+                    element.Add(SerializeNode(field));
                 break;
-                
-            case ArrayNode arrayNode:
-                foreach (var child in arrayNode.Children)
+
+            case ArrayValue a:
+                foreach (var child in a.Children)
                 {
                     var entry = new XElement("entry");
-                    if (child is StructNode)
+                    if (child is StructValue childStruct)
                     {
-                        foreach (var grandChild in child.Children)
+                        foreach (var grandChild in childStruct.Children)
                             entry.Add(SerializeNode(grandChild));
                     }
                     else
                     {
-                        entry.Value = child.DisplayValue;
+                        entry.Value = FormatLeaf(child);
                     }
                     element.Add(entry);
                 }
                 break;
-                
-            case StringNode stringNode:
-                element.Value = stringNode.Value;
+
+            case StringValue s:
+                element.Value = s.Value;
                 break;
-                
-            case NumberNode numberNode:
-                element.Value = numberNode.OriginalType switch
+
+            case LocalizedStringValue l:
+                element.Value = string.IsNullOrEmpty(l.SecondaryValue)
+                    ? l.PrimaryValue
+                    : $"{l.PrimaryValue} [{l.SecondaryValue}]";
+                break;
+
+            case NumberValue n:
+                element.Value = n.OriginalType switch
                 {
-                    NumericType.Float => numberNode.Value.ToString("G9", CultureInfo.InvariantCulture),
-                    NumericType.Int64 or NumericType.UInt64 => ((long)numberNode.Value).ToString(CultureInfo.InvariantCulture),
-                    _ => ((int)numberNode.Value).ToString(CultureInfo.InvariantCulture)
+                    NumericType.Float => n.Value.ToString("G9", CultureInfo.InvariantCulture),
+                    NumericType.Int64 or NumericType.UInt64
+                        => ((long)n.Value).ToString(CultureInfo.InvariantCulture),
+                    _ => ((int)n.Value).ToString(CultureInfo.InvariantCulture)
                 };
                 break;
-                
-            case BooleanNode boolNode:
-                element.Value = boolNode.Value ? "true" : "false";
+
+            case BoolValue b:
+                element.Value = b.Value ? "true" : "false";
                 break;
-                
-            case EnumNode enumNode:
-                element.Value = string.IsNullOrEmpty(enumNode.ResolvedName)
-                    ? $"0x{enumNode.RawValue:X8}"
-                    : $"{enumNode.ResolvedName}, 0x{enumNode.RawValue:X8}";
+
+            case EnumValue e:
+                element.Value = string.IsNullOrEmpty(e.ResolvedName)
+                    ? $"0x{e.RawValue:X8}"
+                    : $"{e.ResolvedName}, 0x{e.RawValue:X8}";
                 break;
-                
-            case NullNode:
-                // Empty element for null
+
+            case VectorValue v:
+                element.Value = FormatVector(v);
+                break;
+
+            case NullValue:
+                // empty
                 break;
         }
-        
+
         return element;
     }
-    
+
+    private static string FormatLeaf(AssetValue node) => node switch
+    {
+        StringValue s => s.Value,
+        LocalizedStringValue l => string.IsNullOrEmpty(l.SecondaryValue)
+            ? l.PrimaryValue
+            : $"{l.PrimaryValue} [{l.SecondaryValue}]",
+        NumberValue n => n.OriginalType == NumericType.Float
+            ? n.Value.ToString("G9", CultureInfo.InvariantCulture)
+            : ((long)n.Value).ToString(CultureInfo.InvariantCulture),
+        BoolValue b => b.Value ? "true" : "false",
+        EnumValue e => string.IsNullOrEmpty(e.ResolvedName)
+            ? $"0x{e.RawValue:X8}"
+            : $"{e.ResolvedName}, 0x{e.RawValue:X8}",
+        VectorValue v => FormatVector(v),
+        _ => string.Empty
+    };
+
+    private static string FormatVector(VectorValue v)
+    {
+        var ci = CultureInfo.InvariantCulture;
+        return v.VectorType switch
+        {
+            VectorType.Vector2 => $"{v.X.ToString("G9", ci)} {v.Y.ToString("G9", ci)}",
+            VectorType.Vector3 => $"{v.X.ToString("G9", ci)} {v.Y.ToString("G9", ci)} {v.Z.ToString("G9", ci)}",
+            _                  => $"{v.X.ToString("G9", ci)} {v.Y.ToString("G9", ci)} {v.Z.ToString("G9", ci)} {v.W.ToString("G9", ci)}"
+        };
+    }
+
     private static string SanitizeName(string name)
     {
-        // Remove array index brackets for XML element names
         if (name.StartsWith('[') && name.EndsWith(']'))
             return "entry";
         return name;
@@ -97,89 +130,45 @@ public static class AssetSerializer
 }
 
 /// <summary>
-/// High-level API for the Editor to interact with the Core.
-/// Thread-safe, caches parser instance.
+/// High-level API for consumers (CLI, Editor entry points). Lazy parser; thread-safe enough for
+/// the editor's single-parser pattern.
 /// </summary>
 public sealed class AssetService
 {
     private readonly Lazy<AssetParser> _parser = new(() => new AssetParser());
-    
-    /// <summary>Get the parser instance (lazy-initialized).</summary>
+
     public AssetParser Parser => _parser.Value;
-    
-    /// <summary>
-    /// Load an asset file and return the parsed node tree.
-    /// </summary>
-    public AssetNode LoadFile(string filePath)
-    {
-        return Parser.ParseFile(filePath);
-    }
-    
-    /// <summary>
-    /// Load an asset from a stream.
-    /// </summary>
-    public AssetNode Load(Stream stream, string rootStructName, int headerSize)
-    {
-        return Parser.Parse(stream, rootStructName, headerSize);
-    }
-    
-    /// <summary>
-    /// Load an asset from a byte array.
-    /// </summary>
-    public AssetNode Load(byte[] data, string rootStructName, int headerSize)
-    {
-        return Parser.Parse(data, rootStructName, headerSize);
-    }
-    
-    /// <summary>
-    /// Get file type info for an extension.
-    /// </summary>
-    public FileTypeInfo? GetFileType(string extension)
-    {
-        return Parser.GetFileType(extension);
-    }
-    
-    /// <summary>
-    /// Get all supported file extensions.
-    /// </summary>
+
+    public AssetValue LoadFile(string filePath) => Parser.ParseFile(filePath);
+
+    public AssetValue Load(Stream stream, string rootStructName, int headerSize)
+        => Parser.Parse(stream, rootStructName, headerSize);
+
+    public AssetValue Load(byte[] data, string rootStructName, int headerSize)
+        => Parser.Parse(data, rootStructName, headerSize);
+
+    public FileTypeInfo? GetFileType(string extension) => Parser.GetFileType(extension);
+
     public IEnumerable<string> SupportedExtensions => Parser.SupportedTypes;
-    
-    /// <summary>
-    /// Export an asset node tree to XML.
-    /// </summary>
-    public void ExportXml(AssetNode root, string outputPath)
+
+    public void ExportXml(AssetValue root, string outputPath)
     {
         var xml = AssetSerializer.ToXmlString(root);
         File.WriteAllText(outputPath, xml);
     }
-    
-    /// <summary>
-    /// Get schema information for a struct type.
-    /// </summary>
-    public StructDefinition? GetStructSchema(string typeName)
+
+    public StructDefinition? GetStructSchema(string typeName) => Parser.Structs.GetValueOrDefault(typeName);
+    public EnumDefinition? GetEnumSchema(string enumName) => Parser.Enums.GetValueOrDefault(enumName);
+
+    /// <summary>Depth-first flatten of the tree, useful for search/iteration.</summary>
+    public List<AssetValue> Flatten(AssetValue root)
     {
-        return Parser.Structs.GetValueOrDefault(typeName);
-    }
-    
-    /// <summary>
-    /// Get enum definition for resolving values.
-    /// </summary>
-    public EnumDefinition? GetEnumSchema(string enumName)
-    {
-        return Parser.Enums.GetValueOrDefault(enumName);
-    }
-    
-    /// <summary>
-    /// Flatten an asset tree to a list (for search/iteration).
-    /// </summary>
-    public List<AssetNode> Flatten(AssetNode root)
-    {
-        var result = new List<AssetNode>();
+        var result = new List<AssetValue>();
         FlattenRecursive(root, result);
         return result;
     }
-    
-    private void FlattenRecursive(AssetNode node, List<AssetNode> result)
+
+    private static void FlattenRecursive(AssetValue node, List<AssetValue> result)
     {
         result.Add(node);
         foreach (var child in node.Children)
