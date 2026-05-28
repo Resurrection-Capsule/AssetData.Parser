@@ -10,6 +10,8 @@ namespace AssetData.Parser;
 /// </summary>
 public sealed class BlobReader
 {
+    public static bool Trace = Environment.GetEnvironmentVariable("ASSETPARSER_TRACE") == "1";
+
     private readonly byte[] _data;
     private readonly int _blobStart;
     private int _cursor;
@@ -32,6 +34,7 @@ public sealed class BlobReader
 
         var result = Encoding.UTF8.GetString(_data.AsSpan(start, _cursor - start));
         if (_cursor < _data.Length) _cursor++;
+        if (Trace) Console.Error.WriteLine($"  ReadString @0x{start:X}..0x{_cursor:X}: \"{result}\"");
         return result;
     }
 
@@ -39,6 +42,7 @@ public sealed class BlobReader
     {
         int start = _cursor;
         _cursor += elementSize * count;
+        if (Trace) Console.Error.WriteLine($"  ReserveArray @0x{start:X} ({count}x{elementSize}) -> cursor=0x{_cursor:X} (datalen=0x{_data.Length:X})");
         return start;
     }
 
@@ -46,6 +50,7 @@ public sealed class BlobReader
     {
         int start = _cursor;
         _cursor += structSize;
+        if (Trace) Console.Error.WriteLine($"  ReserveStruct @0x{start:X} (size={structSize}) -> cursor=0x{_cursor:X}");
         return start;
     }
 
@@ -214,8 +219,10 @@ public sealed class AssetParser
 
     private void ParseStruct(StructValue parent, StructDefinition structDef, int baseOffset)
     {
+        if (BlobReader.Trace) Console.Error.WriteLine($"[Struct {structDef.Name} @ base=0x{baseOffset:X}] cursor=0x{_blob.Position:X}");
         foreach (var field in structDef.Fields)
         {
+            if (BlobReader.Trace) Console.Error.WriteLine($"  .{field.Name} ({field.Type}{(field.ElementType != null ? "<" + field.ElementType + ">" : "")}) @ 0x{baseOffset + field.Offset:X}");
             var value = ParseField(field, baseOffset + field.Offset, structDef.Name);
             if (value != null)
                 parent.Add(value);

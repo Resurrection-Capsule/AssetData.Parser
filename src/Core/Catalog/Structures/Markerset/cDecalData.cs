@@ -6,7 +6,7 @@ public sealed class cDecalData : AssetCatalog
     {
         Struct("cDecalData", 0x10c,
             Field("size", DataType.Vector3, 0x0),
-            Field("material", DataType.CharPtr, 0xc, 0x40),
+            Field("material", DataType.Char, 0xc, 0x40),
             Field("layer", DataType.Int, 0x4c),
             Field("diffuse", DataType.Char, 0x50, 0x40),
             Field("normal", DataType.Char, 0x90, 0x40),
