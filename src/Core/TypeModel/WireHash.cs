@@ -56,4 +56,18 @@ public static class WireHash
     public const uint LocalizedAssetString = 0x1D1FF116;  // cLocalizedAssetString
     public const uint Array                = 0x555CCDF4;
     public const uint Nullable             = 0x71AB5182;
+
+    /// <summary>
+    /// Resolves a textual element-type name to its wire hash. Element types are authored as
+    /// either a <see cref="DataType"/> name (e.g. "UInt64", "Enum", "cLocalizedAssetString")
+    /// or a registered struct name. Shared between <see cref="RegistryBuilder"/> and the
+    /// runtime dispatch in <c>ParseArrayField</c>/<c>ParseNullableField</c>.
+    /// </summary>
+    public static uint ResolveElementHash(string? elementType)
+    {
+        if (string.IsNullOrEmpty(elementType)) return 0;
+        return System.Enum.TryParse<DataType>(elementType, true, out var dt)
+            ? (uint)dt
+            : Fnv1a(elementType);
+    }
 }

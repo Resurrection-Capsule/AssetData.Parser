@@ -63,24 +63,12 @@ public static class RegistryBuilder
 
         uint elementHash = f.Type switch
         {
-            DataType.Array    => ResolveElementHash(f.ElementType),
+            DataType.Array    => WireHash.ResolveElementHash(f.ElementType),
             DataType.Nullable => WireHash.Fnv1a(f.ElementType!),
             _                 => 0u
         };
 
         return new FieldDescriptor(
             f.Name, typeHash, f.Offset, elementHash, f.CountOffset, f.BufferSize, f.EnumType);
-    }
-
-    /// <summary>
-    /// Array element types are authored as a string that is either a <see cref="DataType"/> name
-    /// (e.g. "UInt64", "Enum") or a struct name. Mirrors the legacy <c>ParseArrayField</c> dispatch.
-    /// </summary>
-    private static uint ResolveElementHash(string? elementType)
-    {
-        if (string.IsNullOrEmpty(elementType)) return 0;
-        return Enum.TryParse<DataType>(elementType, true, out var dt)
-            ? (uint)dt
-            : WireHash.Fnv1a(elementType);
     }
 }
