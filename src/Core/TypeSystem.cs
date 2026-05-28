@@ -97,20 +97,17 @@ public enum DataType : uint
     
     /// <summary>nullable - [hasValue:4] in header, struct in blob if hasValue != 0</summary>
     Nullable    = 0x71AB5182,
-    
-    /// <summary>tAssetPropertyVector - [count:4][pointer:4] in header, array of 188-byte items in blob</summary>
-    AssetPropertyVector = 0xE8A2A5D7,
-    
+
     // ═══════════════════════════════════════════════════════════════════════
     // SPECIAL
     // ═══════════════════════════════════════════════════════════════════════
-    
-    /// <summary>Inline struct - no indicator, fields embedded at offset</summary>
+
+    /// <summary>
+    /// Inline struct marker (DSL-only). The value 0x8 is NOT a wire type — the parser ignores
+    /// it and dispatches inline structs by resolving FNV1a(ElementType) through the TypeRegistry
+    /// (see AssetParser.ParseField). Kept only so the IStruct() DSL helper has a tag to emit.
+    /// </summary>
     Struct      = 0x00000008,
-    
-    // Legacy aliases for compatibility
-    [Obsolete("Use Int instead")] Int_Legacy = 0x1F886EB0,
-    [Obsolete("Use UInt32 instead")] UInt = 0x54CC76D5
 }
 
 public static class DataTypeExtensions
@@ -161,7 +158,6 @@ public static class DataTypeExtensions
         DataType.Vector3 => 12,
         DataType.Vector4 => 16,
         DataType.Orientation => 16,
-        DataType.AssetPropertyVector => 8,  // count + pointer
         DataType.cLocalizedAssetString => 8,  // Two 4-byte indicators
         _ => 4  // Default indicator size for dynamic types
     };
@@ -250,7 +246,14 @@ public abstract class AssetCatalog
 {
     private readonly Dictionary<string, StructDefinition> _structs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, EnumDefinition> _enums = new(StringComparer.OrdinalIgnoreCase);
-    
+
+    /// <summary>Structs registered by this catalog's <see cref="Build"/>. Consumed by AssetParser's
+    /// explicit merge (replaces the old private-field reflection).</summary>
+    internal IReadOnlyDictionary<string, StructDefinition> Structs => _structs;
+
+    /// <summary>Enums registered by this catalog's <see cref="Build"/>.</summary>
+    internal IReadOnlyDictionary<string, EnumDefinition> Enums => _enums;
+
     protected AssetCatalog() => Build();
     
     protected abstract void Build();

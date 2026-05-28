@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text;
+using AssetData.Parser.Model;
 
 namespace AssetData.Parser;
 
@@ -12,47 +13,48 @@ public sealed class BlobReader
     private readonly byte[] _data;
     private readonly int _blobStart;
     private int _cursor;
-    
+
     public BlobReader(byte[] data, int headerSize)
     {
         _data = data;
         _blobStart = headerSize;
         _cursor = headerSize;
     }
-    
+
     public int Position => _cursor;
     public ReadOnlySpan<byte> Data => _data;
-    
+
     public string ReadString()
     {
         int start = _cursor;
         while (_cursor < _data.Length && _data[_cursor] != 0)
             _cursor++;
-        
+
         var result = Encoding.UTF8.GetString(_data.AsSpan(start, _cursor - start));
         if (_cursor < _data.Length) _cursor++;
         return result;
     }
-    
+
     public int ReserveArray(int elementSize, int count)
     {
         int start = _cursor;
         _cursor += elementSize * count;
         return start;
     }
-    
+
     public int ReserveStruct(int structSize)
     {
         int start = _cursor;
         _cursor += structSize;
         return start;
     }
-    
+
     public bool HasData(int requiredBytes = 1) => _cursor + requiredBytes <= _data.Length;
 }
 
 /// <summary>
-/// Darkspore binary asset parser. Returns AssetNode tree directly for optimal performance.
+/// Darkspore binary asset parser. Produces an immutable L1 <see cref="AssetValue"/> tree
+/// (parser-only model, no INPC). Editor wraps it with its own observable adapter.
 /// Based on reverse engineering of Darkspore.exe parser functions.
 /// </summary>
 public sealed class AssetParser
@@ -60,21 +62,29 @@ public sealed class AssetParser
     private readonly Dictionary<string, StructDefinition> _globalStructs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, EnumDefinition> _globalEnums = new(StringComparer.OrdinalIgnoreCase);
 
+    private TypeRegistry _registry = null!;
+
     private byte[] _data = null!;
     private BlobReader _blob = null!;
-    
+
+    /// <summary>Hash-keyed type registry — the game-faithful identity table.</summary>
+    public TypeRegistry Registry => _registry;
+
+    /// <summary>Unresolved struct references found while building <see cref="Registry"/> (should be empty).</summary>
+    public IReadOnlyList<string> RegistryIssues { get; private set; } = [];
+
     /// <summary>Enable console logging for debugging.</summary>
     public bool EnableLogging { get; set; }
-    
+
     /// <summary>Show binary offsets in logs.</summary>
     public bool ShowOffsets { get; set; }
-    
+
     /// <summary>Get all registered struct definitions (for schema inspection).</summary>
     public IReadOnlyDictionary<string, StructDefinition> Structs => _globalStructs;
-    
+
     /// <summary>Get all registered enum definitions (for schema inspection).</summary>
     public IReadOnlyDictionary<string, EnumDefinition> Enums => _globalEnums;
-    
+
     /// <summary>Get file type by extension. Infers from struct with matching name.</summary>
     public FileTypeInfo? GetFileType(string extension)
     {
@@ -83,14 +93,14 @@ public sealed class AssetParser
         if (structDef == null) return null;
         return new FileTypeInfo(ext, structDef.Name, structDef.Size);
     }
-    
+
     public IEnumerable<string> SupportedTypes => _globalStructs.Keys;
-    
-    public AssetParser() 
+
+    public AssetParser()
     {
         InitializeCatalogs();
     }
-    
+
     private void InitializeCatalogs()
     {
         var assembly = Assembly.GetExecutingAssembly();
@@ -103,6 +113,10 @@ public sealed class AssetParser
             MergeCatalog(catalog);
         }
         ResolveEnumReferences();
+
+        var build = RegistryBuilder.Build(_globalStructs);
+        _registry = build.Registry;
+        RegistryIssues = build.Issues;
     }
 
     private void ResolveEnumReferences()
@@ -121,32 +135,25 @@ public sealed class AssetParser
                     continue;
 
                 string? resolvedEnum = null;
-                
+
                 var specificName = $"{def.Name}.{field.Name}";
                 if (_globalEnums.ContainsKey(specificName))
                 {
                     resolvedEnum = specificName;
                 }
+                else if (_globalEnums.ContainsKey(field.Name))
+                {
+                    resolvedEnum = field.Name;
+                }
                 else
                 {
-                    if (_globalEnums.ContainsKey(field.Name))
-                    {
-                        resolvedEnum = field.Name;
-                    }
-                    else
-                    {
-                        var pascalName = ToPascalCase(field.Name);
-                        if (_globalEnums.ContainsKey(pascalName))
-                        {
-                            resolvedEnum = pascalName;
-                        }
-                    }
+                    var pascalName = ToPascalCase(field.Name);
+                    if (_globalEnums.ContainsKey(pascalName))
+                        resolvedEnum = pascalName;
                 }
 
                 if (resolvedEnum != null)
-                {
                     fieldsList[i] = field with { EnumType = resolvedEnum };
-                }
             }
         }
     }
@@ -159,124 +166,101 @@ public sealed class AssetParser
 
     private void MergeCatalog(AssetCatalog catalog)
     {
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        
-        var structs = typeof(AssetCatalog)
-            .GetField("_structs", flags)
-            ?.GetValue(catalog) as Dictionary<string, StructDefinition>;
-        
-        var enums = typeof(AssetCatalog)
-            .GetField("_enums", flags)
-            ?.GetValue(catalog) as Dictionary<string, EnumDefinition>;
+        foreach (var kvp in catalog.Structs)
+            _globalStructs.TryAdd(kvp.Key, kvp.Value);
 
-        if (structs != null)
-        {
-            foreach (var kvp in structs)
-            {
-                if (!_globalStructs.ContainsKey(kvp.Key))
-                    _globalStructs[kvp.Key] = kvp.Value;
-            }
-        }
-        
-        if (enums != null)
-        {
-            foreach (var kvp in enums)
-            {
-                if (!_globalEnums.ContainsKey(kvp.Key))
-                    _globalEnums[kvp.Key] = kvp.Value;
-            }
-        }
+        foreach (var kvp in catalog.Enums)
+            _globalEnums.TryAdd(kvp.Key, kvp.Value);
     }
 
-    /// <summary>
-    /// Parse a binary asset file and return the root AssetNode.
-    /// </summary>
-    public AssetNode ParseFile(string filePath)
+    /// <summary>Parse a binary asset file and return the root L1 value.</summary>
+    public AssetValue ParseFile(string filePath)
     {
         var extension = Path.GetExtension(filePath);
         var fileType = GetFileType(extension)
             ?? throw new ArgumentException($"Unknown file type: {extension}");
-        
+
         var data = File.ReadAllBytes(filePath);
         return Parse(data, fileType.RootStruct, fileType.HeaderSize);
     }
-    
-    /// <summary>
-    /// Parse binary data and return the root AssetNode.
-    /// </summary>
-    public AssetNode Parse(byte[] data, string rootStructName, int headerSize)
+
+    /// <summary>Parse binary data and return the root L1 value.</summary>
+    public AssetValue Parse(byte[] data, string rootStructName, int headerSize)
     {
         if (!_globalStructs.TryGetValue(rootStructName, out var structDef))
             throw new ArgumentException($"Unknown struct: {rootStructName}");
-        
+
         _data = data;
         _blob = new BlobReader(data, headerSize);
-        
-        var root = new StructNode
+
+        var root = new StructValue
         {
             Name = rootStructName.ToLowerInvariant(),
             TypeName = structDef.Name,
             BinaryOffset = 0
         };
-        
+
         ParseStruct(root, structDef, baseOffset: 0);
         return root;
     }
-    
-    /// <summary>
-    /// Parse binary data from a stream.
-    /// </summary>
-    public AssetNode Parse(Stream stream, string rootStructName, int headerSize)
+
+    /// <summary>Parse binary data from a stream.</summary>
+    public AssetValue Parse(Stream stream, string rootStructName, int headerSize)
     {
         using var ms = new MemoryStream();
         stream.CopyTo(ms);
         return Parse(ms.ToArray(), rootStructName, headerSize);
     }
-    
-    private void ParseStruct(AssetNode parent, StructDefinition structDef, int baseOffset)
+
+    private void ParseStruct(StructValue parent, StructDefinition structDef, int baseOffset)
     {
         foreach (var field in structDef.Fields)
         {
-            var node = ParseField(field, baseOffset + field.Offset, structDef.Name);
-            if (node != null)
-                parent.AddChild(node);
+            var value = ParseField(field, baseOffset + field.Offset, structDef.Name);
+            if (value != null)
+                parent.Add(value);
         }
     }
-    
-    private AssetNode? ParseField(FieldDefinition field, int offset, string parentStructName)
+
+    private AssetValue? ParseField(FieldDefinition field, int offset, string parentStructName)
     {
         try
         {
-            return field.Type switch
+            // Game-faithful dispatch (mirrors AssetParser::DeserializeObject 0x009cd2c0):
+            // the field's type hash either resolves to a registered struct (recurse) or is a
+            // sentinel / value-type handled inline. Inline structs (legacy DataType.Struct)
+            // carry their element name as the hash source — D2 fix: no fabricated sentinel,
+            // just "FindTypeByHash returned a type ⇒ recurse", the game's first check.
+            uint typeHash = field.Type == DataType.Struct
+                ? WireHash.Fnv1a(field.ElementType!)
+                : (uint)field.Type;
+
+            if (_registry.FindTypeByHash(typeHash) is not null)
+                return ParseInlineStructField(field, offset);
+
+            return typeHash switch
             {
-                // ═══════════════════════════════════════════════════════════
-                // Primitives
-                // ═══════════════════════════════════════════════════════════
-                
-                DataType.Bool => new BooleanNode
+                WireHash.Bool => new BoolValue
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset) != 0,
                     BinaryOffset = offset
                 },
-                
-                DataType.Int or DataType.Int32 => new NumberNode
+                WireHash.Int or WireHash.Int32 => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadInt32(offset),
                     OriginalType = NumericType.Int32,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt32 => new NumberNode
+                WireHash.UInt32 => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset),
                     OriginalType = NumericType.UInt32,
                     BinaryOffset = offset
                 },
-                
-                DataType.HashId => new NumberNode
+                WireHash.HashId => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset),
@@ -284,8 +268,7 @@ public sealed class AssetParser
                     Format = NumberFormat.Hex,
                     BinaryOffset = offset
                 },
-                
-                DataType.ObjId => new NumberNode
+                WireHash.ObjId => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadUInt32(offset),
@@ -293,24 +276,21 @@ public sealed class AssetParser
                     Format = NumberFormat.Hex,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt16 => new NumberNode
+                WireHash.UInt16 => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadUInt16(offset),
                     OriginalType = NumericType.UInt16,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt8 => new NumberNode
+                WireHash.UInt8 => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadUInt8(offset),
                     OriginalType = NumericType.UInt8,
                     BinaryOffset = offset
                 },
-                
-                DataType.Float => new NumberNode
+                WireHash.Float => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadFloat(offset),
@@ -318,30 +298,23 @@ public sealed class AssetParser
                     Format = NumberFormat.Float,
                     BinaryOffset = offset
                 },
-                
-                DataType.Int64 => new NumberNode
+                WireHash.Int64 => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadInt64(offset),
                     OriginalType = NumericType.Int64,
                     BinaryOffset = offset
                 },
-                
-                DataType.UInt64 => new NumberNode
+                WireHash.UInt64 => new NumberValue
                 {
                     Name = field.Name,
                     Value = ReadUInt64(offset),
                     OriginalType = NumericType.UInt64,
                     BinaryOffset = offset
                 },
-                
-                DataType.Enum => ParseEnumField(field, offset),
-                
-                // ═══════════════════════════════════════════════════════════
-                // Vectors
-                // ═══════════════════════════════════════════════════════════
-                
-                DataType.Vector2 => new VectorNode
+                WireHash.Enum => ParseEnumField(field, offset),
+
+                WireHash.Vector2 => new VectorValue
                 {
                     Name = field.Name,
                     VectorType = VectorType.Vector2,
@@ -349,8 +322,7 @@ public sealed class AssetParser
                     Y = ReadFloat(offset + 4),
                     BinaryOffset = offset
                 },
-                
-                DataType.Vector3 => new VectorNode
+                WireHash.Vector3 => new VectorValue
                 {
                     Name = field.Name,
                     VectorType = VectorType.Vector3,
@@ -359,8 +331,7 @@ public sealed class AssetParser
                     Z = ReadFloat(offset + 8),
                     BinaryOffset = offset
                 },
-                
-                DataType.Vector4 => new VectorNode
+                WireHash.Vector4 => new VectorValue
                 {
                     Name = field.Name,
                     VectorType = VectorType.Vector4,
@@ -370,9 +341,7 @@ public sealed class AssetParser
                     W = ReadFloat(offset + 12),
                     BinaryOffset = offset
                 },
-                
-                // Orientation is stored as XYZW quaternion
-                DataType.Orientation => new VectorNode
+                WireHash.Orientation => new VectorValue
                 {
                     Name = field.Name,
                     VectorType = VectorType.Orientation,
@@ -382,26 +351,16 @@ public sealed class AssetParser
                     W = ReadFloat(offset + 12),
                     BinaryOffset = offset
                 },
-                
-                // ═══════════════════════════════════════════════════════════
-                // Dynamic types
-                // ═══════════════════════════════════════════════════════════
-                
-                DataType.Key => ParseKeyField(field, offset),
-                DataType.Char => ParseCharField(field, offset),
-                DataType.CharPtr => ParseCharPtrField(field, offset),
-                DataType.Asset => ParseAssetField(field, offset),
-                DataType.cLocalizedAssetString => ParseLocalizedAssetStringField(field, offset),
 
-                // ═══════════════════════════════════════════════════════════
-                // Containers
-                // ═══════════════════════════════════════════════════════════
-                
-                DataType.Array => ParseArrayField(field, offset),
-                DataType.Nullable => ParseNullableField(field, offset),
-                DataType.Struct => ParseInlineStructField(field, offset),
-                DataType.AssetPropertyVector => ParseAssetPropertyVectorField(field, offset),
-                
+                WireHash.Key => ParseKeyField(field, offset),
+                WireHash.Char => ParseCharField(field, offset),
+                WireHash.CharPtr => ParseCharPtrField(field, offset),
+                WireHash.Asset => ParseAssetField(field, offset),
+                WireHash.LocalizedAssetString => ParseLocalizedAssetStringField(field, offset),
+
+                WireHash.Array => ParseArrayField(field, offset),
+                WireHash.Nullable => ParseNullableField(field, offset),
+
                 _ => null
             };
         }
@@ -411,16 +370,16 @@ public sealed class AssetParser
                 $"Error parsing '{field.Name}' in '{parentStructName}' at 0x{offset:X}: {ex.Message}", ex);
         }
     }
-    
-    private EnumNode ParseEnumField(FieldDefinition field, int offset)
+
+    private EnumValue ParseEnumField(FieldDefinition field, int offset)
     {
         var rawValue = ReadUInt32(offset);
         string? resolvedName = null;
-        
+
         if (field.EnumType != null && _globalEnums.TryGetValue(field.EnumType, out var enumDef))
             resolvedName = enumDef.GetName(rawValue);
-        
-        return new EnumNode
+
+        return new EnumValue
         {
             Name = field.Name,
             EnumType = field.EnumType ?? "",
@@ -429,93 +388,85 @@ public sealed class AssetParser
             BinaryOffset = offset
         };
     }
-    
-    private AssetNode? ParseKeyField(FieldDefinition field, int offset)
+
+    private AssetValue? ParseKeyField(FieldDefinition field, int offset)
     {
         uint indicator = ReadUInt32(offset);
         if (indicator == 0) return null;
-        
-        return new StringNode
+
+        return new StringValue
         {
             Name = field.Name,
             Value = _blob.ReadString(),
-            NodeKind = AssetNodeKind.Asset,
+            NodeKind = AssetValueKind.Asset,
             BinaryOffset = offset
         };
     }
-    
-    private AssetNode? ParseCharField(FieldDefinition field, int offset)
+
+    private AssetValue? ParseCharField(FieldDefinition field, int offset)
     {
         if (field.BufferSize > 0)
         {
-            return new StringNode
+            return new StringValue
             {
                 Name = field.Name,
                 Value = ReadInlineString(offset, field.BufferSize),
-                NodeKind = AssetNodeKind.String,
+                NodeKind = AssetValueKind.String,
                 BinaryOffset = offset
             };
         }
-        
-        uint indicator = ReadUInt32(offset);
-        if (indicator == 0) return null;
-        
-        return new StringNode
-        {
-            Name = field.Name,
-            Value = _blob.ReadString(),
-            NodeKind = AssetNodeKind.String,
-            BinaryOffset = offset
-        };
-    }
-    
-    private AssetNode? ParseCharPtrField(FieldDefinition field, int offset)
-    {
-        uint indicator = ReadUInt32(offset);
-        if (indicator == 0) return null;
-        
-        return new StringNode
-        {
-            Name = field.Name,
-            Value = _blob.ReadString(),
-            NodeKind = AssetNodeKind.String,
-            BinaryOffset = offset
-        };
-    }
-    
-    private AssetNode? ParseAssetField(FieldDefinition field, int offset)
-    {
+
         uint indicator = ReadUInt32(offset);
         if (indicator == 0) return null;
 
-        return new StringNode
+        return new StringValue
         {
             Name = field.Name,
             Value = _blob.ReadString(),
-            NodeKind = AssetNodeKind.Asset,
+            NodeKind = AssetValueKind.String,
             BinaryOffset = offset
         };
     }
 
-    private AssetNode? ParseLocalizedAssetStringField(FieldDefinition field, int offset)
+    private AssetValue? ParseCharPtrField(FieldDefinition field, int offset)
+    {
+        uint indicator = ReadUInt32(offset);
+        if (indicator == 0) return null;
+
+        return new StringValue
+        {
+            Name = field.Name,
+            Value = _blob.ReadString(),
+            NodeKind = AssetValueKind.String,
+            BinaryOffset = offset
+        };
+    }
+
+    private AssetValue? ParseAssetField(FieldDefinition field, int offset)
+    {
+        uint indicator = ReadUInt32(offset);
+        if (indicator == 0) return null;
+
+        return new StringValue
+        {
+            Name = field.Name,
+            Value = _blob.ReadString(),
+            NodeKind = AssetValueKind.Asset,
+            BinaryOffset = offset
+        };
+    }
+
+    private AssetValue? ParseLocalizedAssetStringField(FieldDefinition field, int offset)
     {
         uint indicator1 = ReadUInt32(offset);
         uint indicator2 = ReadUInt32(offset + 4);
 
-        // Both indicators zero = null field
-        if (indicator1 == 0 && indicator2 == 0)
-            return null;
+        if (indicator1 == 0 && indicator2 == 0) return null;
 
-        string primaryValue = "";
-        string secondaryValue = "";
+        string primaryValue = indicator1 != 0 ? _blob.ReadString() : "";
+        string secondaryValue = indicator2 != 0 ? _blob.ReadString() : "";
 
-        if (indicator1 != 0)
-            primaryValue = _blob.ReadString();
-
-        if (indicator2 != 0)
-            secondaryValue = _blob.ReadString();
-
-        return new LocalizedStringNode
+        return new LocalizedStringValue
         {
             Name = field.Name,
             PrimaryValue = primaryValue,
@@ -524,70 +475,71 @@ public sealed class AssetParser
         };
     }
 
-    private ArrayNode ParseArrayField(FieldDefinition field, int offset)
+    private ArrayValue ParseArrayField(FieldDefinition field, int offset)
     {
         uint hasValue = ReadUInt32(offset);
         int count = ReadInt32(offset + field.CountOffset);
-        
-        var arrayNode = new ArrayNode
+
+        var array = new ArrayValue
         {
             Name = field.Name,
             ElementType = field.ElementType ?? "unknown",
             BinaryOffset = offset
         };
-        
+
         if (hasValue == 0 || count <= 0)
-            return arrayNode;
-        
+            return array;
+
         if (count > 1_000_000)
             throw new InvalidOperationException($"Array '{field.Name}' has invalid count: {count}");
 
-        // Check if element type is a struct
-        if (_globalStructs.TryGetValue(field.ElementType!, out var elementStructDef))
+        uint elementHash = WireHash.ResolveElementHash(field.ElementType);
+
+        if (_registry.FindTypeByHash(elementHash) is TypeDescriptor elementDesc)
         {
+            var elementStructDef = _globalStructs[elementDesc.Name];
             int arrayStart = _blob.ReserveArray(elementStructDef.Size, count);
-            
+
             for (int i = 0; i < count; i++)
             {
                 int elemOffset = arrayStart + (i * elementStructDef.Size);
-                var entry = new StructNode
+                var entry = new StructValue
                 {
                     Name = $"[{i}]",
-                    TypeName = field.ElementType!,
+                    TypeName = elementDesc.Name,
                     BinaryOffset = elemOffset
                 };
                 ParseStruct(entry, elementStructDef, elemOffset);
-                arrayNode.AddChild(entry);
+                array.Add(entry);
             }
-            return arrayNode;
+            return array;
         }
-        
-        // Must be a primitive, vector, or dynamic type
-        if (!Enum.TryParse<DataType>(field.ElementType, true, out var elemType))
-            throw new InvalidOperationException($"Unknown element type: {field.ElementType}");
-        
-        // Handle dynamic types (strings) - each has a 4-byte indicator in the header array
-        // Special case: cLocalizedAssetString has 8 bytes (2 indicators)
-        if (elemType.IsDynamic())
+
+        bool isLocalized = elementHash == WireHash.LocalizedAssetString;
+        bool isDynamicString =
+            elementHash == WireHash.Key      ||
+            elementHash == WireHash.Char     ||
+            elementHash == WireHash.CharPtr  ||
+            elementHash == WireHash.Asset    ||
+            isLocalized;
+
+        if (isDynamicString)
         {
-            int indicatorSize = elemType == DataType.cLocalizedAssetString ? 8 : 4;
+            int indicatorSize = isLocalized ? 8 : 4;
             int indicatorStart = _blob.ReserveArray(indicatorSize, count);
 
             for (int i = 0; i < count; i++)
             {
                 int indicatorOffset = indicatorStart + (i * indicatorSize);
+                AssetValue entry;
 
-                AssetNode entry;
-
-                if (elemType == DataType.cLocalizedAssetString)
+                if (isLocalized)
                 {
-                    uint indicator1 = ReadUInt32(indicatorOffset);
-                    uint indicator2 = ReadUInt32(indicatorOffset + 4);
-
-                    string primary = indicator1 != 0 ? _blob.ReadString() : "";
-                    string secondary = indicator2 != 0 ? _blob.ReadString() : "";
-
-                    entry = new LocalizedStringNode
+                    uint ind1 = ReadUInt32(indicatorOffset);
+                    uint ind2 = ReadUInt32(indicatorOffset + 4);
+                    string primary   = ind1 != 0 ? _blob.ReadString() : "";
+                    string secondary = ind2 != 0 ? _blob.ReadString() : "";
+                    entry = new LocalizedStringValue
                     {
                         Name = $"[{i}]",
                         PrimaryValue = primary,
@@ -598,202 +550,106 @@ public sealed class AssetParser
                 else
                 {
                     uint indicator = ReadUInt32(indicatorOffset);
-
-                    if (indicator != 0)
+                    string value = indicator != 0 ? _blob.ReadString() : "";
+                    entry = new StringValue
                     {
-                        entry = new StringNode
-                        {
-                            Name = $"[{i}]",
-                            Value = _blob.ReadString(),
-                            NodeKind = elemType == DataType.Asset ? AssetNodeKind.Asset : AssetNodeKind.String,
-                            BinaryOffset = indicatorOffset
-                        };
-                    }
-                    else
-                    {
-                        entry = new StringNode
-                        {
-                            Name = $"[{i}]",
-                            Value = "",
-                            NodeKind = AssetNodeKind.String,
-                            BinaryOffset = indicatorOffset
-                        };
-                    }
+                        Name = $"[{i}]",
+                        Value = value,
+                        NodeKind = elementHash == WireHash.Asset ? AssetValueKind.Asset : AssetValueKind.String,
+                        BinaryOffset = indicatorOffset
+                    };
                 }
-                arrayNode.AddChild(entry);
+                array.Add(entry);
             }
-            return arrayNode;
+            return array;
         }
-        
-        // Handle vector types
-        if (elemType.IsVector())
-        {
-            int elementSize = elemType.GetSize();
-            int arrayStart = _blob.ReserveArray(elementSize, count);
-            
-            for (int i = 0; i < count; i++)
-            {
-                int elemOffset = arrayStart + (i * elementSize);
-                var entry = CreateVectorNode($"[{i}]", elemType, elemOffset);
-                arrayNode.AddChild(entry);
-            }
-            return arrayNode;
-        }
-        
-        // Handle primitive types
-        int primitiveSize = elemType.GetSize();
-        int arrayStart2 = _blob.ReserveArray(primitiveSize, count);
-        
+
+        int elementSize = GetWireSize(elementHash);
+        if (elementSize == 0)
+            throw new InvalidOperationException($"Unknown element type: {field.ElementType}");
+
+        int arrayStart2 = _blob.ReserveArray(elementSize, count);
         for (int i = 0; i < count; i++)
         {
-            int elemOffset = arrayStart2 + (i * primitiveSize);
-            var entry = CreatePrimitiveNode($"[{i}]", elemType, elemOffset, field.EnumType);
-            arrayNode.AddChild(entry);
+            int elemOffset = arrayStart2 + (i * elementSize);
+            var entry = IsVectorHash(elementHash)
+                ? CreateVectorValue($"[{i}]", elementHash, elemOffset)
+                : CreatePrimitiveValue($"[{i}]", elementHash, elemOffset, field.EnumType);
+            array.Add(entry);
         }
-        
-        return arrayNode;
+
+        return array;
     }
-    
-    private AssetNode ParseAssetPropertyVectorField(FieldDefinition field, int offset)
-    {
-        // Read count and pointer from header
-        int count = ReadInt32(offset);
-        uint dataPointer = ReadUInt32(offset + 4);
-        
-        var arrayNode = new ArrayNode
-        {
-            Name = field.Name,
-            ElementType = "AssetProperty",
-            BinaryOffset = offset
-        };
-        
-        if (count <= 0 || dataPointer == 0)
-            return arrayNode;
-        
-        // Reserve blob space for array
-        // Each AssetProperty item is 188 bytes (0xBC)
-        const int ITEM_SIZE = 188;
-        int arrayStart = _blob.ReserveArray(ITEM_SIZE, count);
-        
-        // Parse each AssetProperty struct
-        for (int i = 0; i < count; i++)
-        {
-            int itemOffset = arrayStart + (i * ITEM_SIZE);
-            var item = ParseAssetPropertyItem(i, itemOffset);
-            arrayNode.AddChild(item);
-        }
-        
-        return arrayNode;
-    }
-    
-    private StructNode ParseAssetPropertyItem(int index, int offset)
-    {
-        var item = new StructNode
-        {
-            Name = $"[{index}]",
-            TypeName = "AssetProperty",
-            BinaryOffset = offset
-        };
-        
-        // Parse 4-byte header fields (16 bytes total)
-        item.AddChild(new NumberNode
-        {
-            Name = "NameHash",
-            Value = ReadUInt32(offset),
-            OriginalType = NumericType.HashId,
-            Format = NumberFormat.Hex,
-            BinaryOffset = offset
-        });
-        
-        item.AddChild(new NumberNode
-        {
-            Name = "TypeHash",
-            Value = ReadUInt32(offset + 4),
-            OriginalType = NumericType.HashId,
-            Format = NumberFormat.Hex,
-            BinaryOffset = offset + 4
-        });
-        
-        item.AddChild(new NumberNode
-        {
-            Name = "ValueOffset",
-            Value = ReadUInt32(offset + 8),
-            OriginalType = NumericType.UInt32,
-            BinaryOffset = offset + 8
-        });
-        
-        item.AddChild(new NumberNode
-        {
-            Name = "Flags",
-            Value = ReadUInt32(offset + 12),
-            OriginalType = NumericType.UInt32,
-            Format = NumberFormat.Hex,
-            BinaryOffset = offset + 12
-        });
-        
-        // Read 172 bytes of variant data
-        // TODO: This could be interpreted based on TypeHash
-        // For now, display as hex dump for debugging
-        var dataBytes = new byte[172];
-        Array.Copy(_data, offset + 16, dataBytes, 0, 172);
-        
-        item.AddChild(new StringNode
-        {
-            Name = "VariantData",
-            Value = $"[{dataBytes.Length} bytes]",
-            BinaryOffset = offset + 16
-        });
-        
-        return item;
-    }
-    
-    private AssetNode? ParseNullableField(FieldDefinition field, int offset)
+
+    private AssetValue ParseNullableField(FieldDefinition field, int offset)
     {
         uint hasValue = ReadUInt32(offset);
         if (hasValue == 0)
         {
-            return new NullNode
+            return new NullValue
             {
                 Name = field.Name,
                 BinaryOffset = offset
             };
         }
-        
-        if (!_globalStructs.TryGetValue(field.ElementType!, out var structDef))
+
+        uint elementHash = WireHash.Fnv1a(field.ElementType!);
+        if (_registry.FindTypeByHash(elementHash) is not TypeDescriptor desc)
             throw new InvalidOperationException($"Unknown struct for nullable: {field.ElementType}");
-        
+
+        var structDef = _globalStructs[desc.Name];
         int structStart = _blob.ReserveStruct(structDef.Size);
-        
-        var node = new StructNode
+
+        var node = new StructValue
         {
             Name = field.Name,
-            TypeName = field.ElementType!,
+            TypeName = desc.Name,
             BinaryOffset = structStart
         };
-        
+
         ParseStruct(node, structDef, structStart);
         return node;
     }
-    
-    private StructNode ParseInlineStructField(FieldDefinition field, int offset)
+
+    private StructValue ParseInlineStructField(FieldDefinition field, int offset)
     {
-        if (!_globalStructs.TryGetValue(field.ElementType!, out var structDef))
+        uint elementHash = WireHash.Fnv1a(field.ElementType!);
+        if (_registry.FindTypeByHash(elementHash) is not TypeDescriptor desc)
             throw new InvalidOperationException($"Unknown struct for inline: {field.ElementType}");
-        
-        var node = new StructNode
+
+        var structDef = _globalStructs[desc.Name];
+        var node = new StructValue
         {
             Name = field.Name,
-            TypeName = field.ElementType!,
+            TypeName = desc.Name,
             BinaryOffset = offset
         };
-        
+
         ParseStruct(node, structDef, offset);
         return node;
     }
-    
-    private VectorNode CreateVectorNode(string name, DataType type, int offset) => type switch
+
+    private static bool IsVectorHash(uint hash) =>
+        hash == WireHash.Vector2 || hash == WireHash.Vector3 ||
+        hash == WireHash.Vector4 || hash == WireHash.Orientation;
+
+    private static int GetWireSize(uint hash) => hash switch
     {
-        DataType.Vector2 => new VectorNode
+        WireHash.Bool   or WireHash.Int   or WireHash.Int32  or
+        WireHash.UInt32 or WireHash.HashId or WireHash.ObjId or
+        WireHash.Float  or WireHash.Enum                          => 4,
+        WireHash.UInt16                                           => 2,
+        WireHash.UInt8                                            => 1,
+        WireHash.Int64  or WireHash.UInt64                        => 8,
+        WireHash.Vector2                                          => 8,
+        WireHash.Vector3                                          => 12,
+        WireHash.Vector4 or WireHash.Orientation                  => 16,
+        _                                                         => 0
+    };
+
+    private VectorValue CreateVectorValue(string name, uint hash, int offset) => hash switch
+    {
+        WireHash.Vector2 => new VectorValue
         {
             Name = name,
             VectorType = VectorType.Vector2,
@@ -801,7 +657,7 @@ public sealed class AssetParser
             Y = ReadFloat(offset + 4),
             BinaryOffset = offset
         },
-        DataType.Vector3 => new VectorNode
+        WireHash.Vector3 => new VectorValue
         {
             Name = name,
             VectorType = VectorType.Vector3,
@@ -810,7 +666,7 @@ public sealed class AssetParser
             Z = ReadFloat(offset + 8),
             BinaryOffset = offset
         },
-        DataType.Vector4 => new VectorNode
+        WireHash.Vector4 => new VectorValue
         {
             Name = name,
             VectorType = VectorType.Vector4,
@@ -820,7 +676,7 @@ public sealed class AssetParser
             W = ReadFloat(offset + 12),
             BinaryOffset = offset
         },
-        DataType.Orientation => new VectorNode
+        WireHash.Orientation => new VectorValue
         {
             Name = name,
             VectorType = VectorType.Orientation,
@@ -830,32 +686,32 @@ public sealed class AssetParser
             W = ReadFloat(offset + 12),
             BinaryOffset = offset
         },
-        _ => throw new InvalidOperationException($"Not a vector type: {type}")
+        _ => throw new InvalidOperationException($"Not a vector hash: 0x{hash:X8}")
     };
-    
-    private AssetNode CreatePrimitiveNode(string name, DataType type, int offset, string? enumType) => type switch
+
+    private AssetValue CreatePrimitiveValue(string name, uint hash, int offset, string? enumType) => hash switch
     {
-        DataType.Bool => new BooleanNode
+        WireHash.Bool => new BoolValue
         {
             Name = name,
             Value = ReadUInt32(offset) != 0,
             BinaryOffset = offset
         },
-        DataType.Int or DataType.Int32 => new NumberNode
+        WireHash.Int or WireHash.Int32 => new NumberValue
         {
             Name = name,
             Value = ReadInt32(offset),
             OriginalType = NumericType.Int32,
             BinaryOffset = offset
         },
-        DataType.UInt32 => new NumberNode
+        WireHash.UInt32 => new NumberValue
         {
             Name = name,
             Value = ReadUInt32(offset),
             OriginalType = NumericType.UInt32,
             BinaryOffset = offset
         },
-        DataType.HashId => new NumberNode
+        WireHash.HashId => new NumberValue
         {
             Name = name,
             Value = ReadUInt32(offset),
@@ -863,7 +719,7 @@ public sealed class AssetParser
             Format = NumberFormat.Hex,
             BinaryOffset = offset
         },
-        DataType.ObjId => new NumberNode
+        WireHash.ObjId => new NumberValue
         {
             Name = name,
             Value = ReadUInt32(offset),
@@ -871,21 +727,21 @@ public sealed class AssetParser
             Format = NumberFormat.Hex,
             BinaryOffset = offset
         },
-        DataType.UInt16 => new NumberNode
+        WireHash.UInt16 => new NumberValue
         {
             Name = name,
             Value = ReadUInt16(offset),
             OriginalType = NumericType.UInt16,
             BinaryOffset = offset
         },
-        DataType.UInt8 => new NumberNode
+        WireHash.UInt8 => new NumberValue
         {
             Name = name,
             Value = ReadUInt8(offset),
             OriginalType = NumericType.UInt8,
             BinaryOffset = offset
         },
-        DataType.Float => new NumberNode
+        WireHash.Float => new NumberValue
         {
             Name = name,
             Value = ReadFloat(offset),
@@ -893,25 +749,25 @@ public sealed class AssetParser
             Format = NumberFormat.Float,
             BinaryOffset = offset
         },
-        DataType.Enum => CreateEnumNode(name, enumType, offset),
-        DataType.Int64 => new NumberNode
+        WireHash.Enum => CreateEnumValue(name, enumType, offset),
+        WireHash.Int64 => new NumberValue
         {
             Name = name,
             Value = ReadInt64(offset),
             OriginalType = NumericType.Int64,
             BinaryOffset = offset
         },
-        DataType.UInt64 => new NumberNode
+        WireHash.UInt64 => new NumberValue
         {
             Name = name,
             Value = ReadUInt64(offset),
             OriginalType = NumericType.UInt64,
             BinaryOffset = offset
         },
-        _ => throw new InvalidOperationException($"Not a primitive type: {type}")
+        _ => throw new InvalidOperationException($"Not a primitive hash: 0x{hash:X8}")
     };
 
-    private EnumNode CreateEnumNode(string name, string? enumType, int offset)
+    private EnumValue CreateEnumValue(string name, string? enumType, int offset)
     {
         var rawValue = ReadUInt32(offset);
         string? resolvedName = null;
@@ -919,7 +775,7 @@ public sealed class AssetParser
         if (enumType != null && _globalEnums.TryGetValue(enumType, out var enumDef))
             resolvedName = enumDef.GetName(rawValue);
 
-        return new EnumNode
+        return new EnumValue
         {
             Name = name,
             EnumType = enumType ?? "",
@@ -932,7 +788,7 @@ public sealed class AssetParser
     // ═══════════════════════════════════════════════════════════════════════
     // Binary readers using Span for performance
     // ═══════════════════════════════════════════════════════════════════════
-    
+
     private byte ReadUInt8(int offset) => _data[offset];
     private ushort ReadUInt16(int offset) => BitConverter.ToUInt16(_data.AsSpan(offset, 2));
     private int ReadInt32(int offset) => BitConverter.ToInt32(_data.AsSpan(offset, 4));
@@ -940,7 +796,7 @@ public sealed class AssetParser
     private long ReadInt64(int offset) => BitConverter.ToInt64(_data.AsSpan(offset, 8));
     private ulong ReadUInt64(int offset) => BitConverter.ToUInt64(_data.AsSpan(offset, 8));
     private float ReadFloat(int offset) => BitConverter.ToSingle(_data.AsSpan(offset, 4));
-    
+
     private string ReadInlineString(int offset, int bufferSize)
     {
         int end = offset;

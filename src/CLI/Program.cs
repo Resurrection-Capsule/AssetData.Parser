@@ -1,18 +1,17 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Xml;
 using AssetData.Parser;
+using AssetData.Parser.Model;
 
 namespace AssetData.Parser.CLI;
 
-/// <summary>
-/// CLI for AssetData.Parser with DBPF support.
-/// </summary>
+/// <summary>CLI for AssetData.Parser with DBPF support.</summary>
 public static partial class Program
 {
-    // Pattern for catalog files: catalog_N.bin
     [GeneratedRegex(@"^catalog_\d+$", RegexOptions.IgnoreCase)]
     private static partial Regex CatalogPattern();
-    
+
     public static int Main(string[] args)
     {
         if (args.Length == 0)
@@ -21,7 +20,6 @@ public static partial class Program
             return 1;
         }
 
-        // Parse arguments
         string? inputFile = null;
         string? dbpfPackage = null;
         string? assetName = null;
@@ -32,43 +30,31 @@ public static partial class Program
         bool listAssets = false;
         string? filterType = null;
         int? randomSeed = null;
-        
+
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
                 case "-d" or "--dbpf":
-                    if (i + 1 < args.Length)
-                        dbpfPackage = args[++i];
+                    if (i + 1 < args.Length) dbpfPackage = args[++i];
                     break;
                 case "-a" or "--asset":
-                    if (i + 1 < args.Length)
-                        assetName = args[++i];
+                    if (i + 1 < args.Length) assetName = args[++i];
                     break;
                 case "-r" or "--registries":
-                    if (i + 1 < args.Length)
-                        registryDir = args[++i];
+                    if (i + 1 < args.Length) registryDir = args[++i];
                     break;
                 case "-o" or "--output":
-                    if (i + 1 < args.Length)
-                        outputDir = args[++i];
+                    if (i + 1 < args.Length) outputDir = args[++i];
                     break;
-                case "--xml":
-                    outputXml = true;
-                    break;
-                case "-v" or "--verbose":
-                    verbose = true;
-                    break;
-                case "-l" or "--list":
-                    listAssets = true;
-                    break;
+                case "--xml":   outputXml = true; break;
+                case "-v" or "--verbose": verbose = true; break;
+                case "-l" or "--list":    listAssets = true; break;
                 case "-t" or "--type":
-                    if (i + 1 < args.Length)
-                        filterType = args[++i];
+                    if (i + 1 < args.Length) filterType = args[++i];
                     break;
                 case "--seed":
-                    if (i + 1 < args.Length)
-                        randomSeed = int.Parse(args[++i]);
+                    if (i + 1 < args.Length) randomSeed = int.Parse(args[++i]);
                     break;
                 case "-h" or "--help":
                     PrintUsage();
@@ -79,22 +65,18 @@ public static partial class Program
                     break;
             }
         }
-        
+
         try
         {
-            // Mode 1: DBPF package
             if (!string.IsNullOrEmpty(dbpfPackage))
             {
-                return HandleDbpf(dbpfPackage, assetName, registryDir, outputDir, verbose, 
+                return HandleDbpf(dbpfPackage, assetName, registryDir, outputDir, verbose,
                     listAssets, filterType, randomSeed);
             }
-            
-            // Mode 2: Single file
+
             if (!string.IsNullOrEmpty(inputFile))
-            {
                 return HandleSingleFile(inputFile, outputDir, outputXml, verbose);
-            }
-            
+
             Console.Error.WriteLine("Error: No input specified.");
             PrintUsage();
             return 1;
@@ -107,121 +89,95 @@ public static partial class Program
             return 1;
         }
     }
-    
-    /// <summary>
-    /// Parse random asset specification: random:Type:Count
-    /// </summary>
+
     private static (bool isRandom, string? type, int count) ParseRandomSpec(string assetArg)
     {
         if (!assetArg.StartsWith("random:", StringComparison.OrdinalIgnoreCase))
             return (false, null, 1);
-        
+
         var parts = assetArg.Split(':', StringSplitOptions.RemoveEmptyEntries);
-        
-        // random: → any type, count 1
-        if (parts.Length == 1)
-            return (true, null, 1);
-        
-        // random:Phase → Phase type, count 1
-        // random:* → any type, count 1
+
+        if (parts.Length == 1) return (true, null, 1);
+
         if (parts.Length == 2)
         {
             var type = parts[1] == "*" ? null : parts[1];
             return (true, type, 1);
         }
-        
-        // random:Phase:5 → Phase type, count 5
-        // random:*:5 → any type, count 5
+
         if (parts.Length == 3)
         {
             var type = parts[1] == "*" ? null : parts[1];
             var count = int.Parse(parts[2]);
             return (true, type, count);
         }
-        
+
         throw new ArgumentException($"Invalid random specification: {assetArg}");
     }
-    
-    /// <summary>
-    /// Get random assets from catalog
-    /// </summary>
-    private static List<string> GetRandomAssets(DbpfReader dbpf, AssetService service, 
+
+    private static List<string> GetRandomAssets(DbpfReader dbpf, AssetService service,
         string? typeFilter, int count, int? seed)
     {
-        // Find catalog file
         byte[]? catalogData = null;
-        
         for (int i = 131; i <= 150; i++)
         {
-            var testName = $"catalog_{i}.bin";
-            var data = dbpf.GetAsset(testName);
-            if (data != null && data.Length > 0)
-            {
-                catalogData = data;
-                break;
-            }
+            var data = dbpf.GetAsset($"catalog_{i}.bin");
+            if (data != null && data.Length > 0) { catalogData = data; break; }
         }
-        
+
         if (catalogData == null)
         {
             var data = dbpf.GetAsset("catalog_0.bin");
-            if (data != null && data.Length > 0)
-                catalogData = data;
+            if (data != null && data.Length > 0) catalogData = data;
         }
-        
+
         if (catalogData == null)
             throw new InvalidOperationException("No catalog found in package. Cannot select random assets.");
-        
-        // Parse catalog
-        var catalogRoot = service.Parser.Parse(catalogData, "Catalog", 8);
+
+        var catalogRoot = service.Parser.Parse(catalogData, "Catalog", 8) as StructValue
+            ?? throw new InvalidOperationException("Catalog root is not a struct.");
+
         var entriesArray = catalogRoot.Children
-            .OfType<ArrayNode>()
-            .FirstOrDefault(n => n.Name == "entries");
-        
-        if (entriesArray == null)
-            throw new InvalidOperationException("Invalid catalog structure.");
-        
-        // Extract asset names
+            .OfType<ArrayValue>()
+            .FirstOrDefault(n => n.Name == "entries")
+            ?? throw new InvalidOperationException("Invalid catalog structure.");
+
         var assetNames = new List<string>();
-        
-        foreach (var entryNode in entriesArray.Children.OfType<StructNode>())
+
+        foreach (var entryNode in entriesArray.Children.OfType<StructValue>())
         {
             var nameNode = entryNode.Children
-                .OfType<StringNode>()
+                .OfType<StringValue>()
                 .FirstOrDefault(n => n.Name == "assetNameWType");
-            
+
             if (nameNode == null || string.IsNullOrWhiteSpace(nameNode.Value))
                 continue;
-            
-            // Apply type filter if specified
+
             if (!string.IsNullOrEmpty(typeFilter))
             {
                 var parts = nameNode.Value.Split('.', 2);
                 if (parts.Length < 2 || !parts[1].Equals(typeFilter, StringComparison.OrdinalIgnoreCase))
                     continue;
             }
-            
+
             assetNames.Add(nameNode.Value);
         }
-        
+
         if (assetNames.Count == 0)
         {
             var filterMsg = string.IsNullOrEmpty(typeFilter) ? "any type" : $"type '{typeFilter}'";
             throw new InvalidOperationException($"No assets found with {filterMsg}.");
         }
-        
-        // Select random assets
+
         var random = seed.HasValue ? new Random(seed.Value) : new Random();
         var selected = new List<string>();
-        
-        // If requesting more than available, just return all (shuffled)
+
         if (count >= assetNames.Count)
         {
             selected = assetNames.OrderBy(_ => random.Next()).ToList();
         }
         else
         {
-            // Select without replacement
             var indices = Enumerable.Range(0, assetNames.Count).ToList();
             for (int i = 0; i < count; i++)
             {
@@ -230,38 +186,27 @@ public static partial class Program
                 indices.RemoveAt(idx);
             }
         }
-        
+
         return selected;
     }
-    
-    /// <summary>
-    /// Determine asset type from name, handling special patterns like catalog_N.bin
-    /// </summary>
+
     private static (string baseName, string? typeName) ParseAssetName(string assetName)
     {
-        // Remove .bin extension if present
-        var name = assetName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase) 
-            ? assetName[..^4] 
+        var name = assetName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)
+            ? assetName[..^4]
             : assetName;
-        
-        // Check for catalog pattern: catalog_N → Catalog type
+
         if (CatalogPattern().IsMatch(name))
-        {
             return (name, "Catalog");
-        }
-        
-        // Standard format: name.Type
+
         var parts = name.Split('.', 2);
         if (parts.Length > 1)
-        {
             return (parts[0], parts[1]);
-        }
-        
-        // No type extension - return null for type
+
         return (name, null);
     }
-    
-    private static int HandleDbpf(string dbpfPath, string? assetName, string? registryDir, 
+
+    private static int HandleDbpf(string dbpfPath, string? assetName, string? registryDir,
         string? outputDir, bool verbose, bool listAssets, string? filterType, int? randomSeed)
     {
         if (!File.Exists(dbpfPath))
@@ -269,17 +214,16 @@ public static partial class Program
             Console.Error.WriteLine($"Error: DBPF file not found: {dbpfPath}");
             return 1;
         }
-        
+
         using var dbpf = new DbpfReader(dbpfPath);
-        
+
         if (verbose)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine($">>> Opening: {Path.GetFileName(dbpfPath)}");
             Console.ResetColor();
         }
-        
-        // Load registries if provided
+
         if (!string.IsNullOrEmpty(registryDir))
         {
             dbpf.LoadRegistries(registryDir);
@@ -290,15 +234,14 @@ public static partial class Program
                 Console.ResetColor();
             }
         }
-        
+
         if (verbose)
         {
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.WriteLine($"    Entries: {dbpf.Entries.Count}");
             Console.ResetColor();
         }
-        
-        // Mode: List assets
+
         if (listAssets)
         {
             if (!string.IsNullOrEmpty(filterType))
@@ -313,19 +256,16 @@ public static partial class Program
             }
             return 0;
         }
-        
-        // Mode: Parse specific asset(s)
+
         if (!string.IsNullOrEmpty(assetName))
         {
-            // Check for random specification
             var (isRandom, typeFilter, count) = ParseRandomSpec(assetName);
-            
+
             if (isRandom)
             {
-                // Random mode
                 var service = new AssetService();
                 var randomAssets = GetRandomAssets(dbpf, service, typeFilter, count, randomSeed);
-                
+
                 if (verbose)
                 {
                     Console.ForegroundColor = ConsoleColor.Cyan;
@@ -335,11 +275,10 @@ public static partial class Program
                     Console.ResetColor();
                     Console.WriteLine();
                 }
-                
-                // Process each random asset
+
                 int successCount = 0;
                 int failCount = 0;
-                
+
                 foreach (var randomAsset in randomAssets)
                 {
                     try
@@ -347,15 +286,13 @@ public static partial class Program
                         Console.ForegroundColor = ConsoleColor.Yellow;
                         Console.WriteLine($"[Processing: {randomAsset}]");
                         Console.ResetColor();
-                        
+
                         var result = ProcessSingleAsset(dbpf, randomAsset, registryDir, outputDir, verbose);
-                        if (result == 0)
-                            successCount++;
-                        else
-                            failCount++;
-                        
+                        if (result == 0) successCount++;
+                        else failCount++;
+
                         if (randomAssets.Count > 1)
-                            Console.WriteLine(); // Separator between assets
+                            Console.WriteLine();
                     }
                     catch (Exception ex)
                     {
@@ -365,8 +302,7 @@ public static partial class Program
                         failCount++;
                     }
                 }
-                
-                // Summary
+
                 if (randomAssets.Count > 1)
                 {
                     Console.WriteLine();
@@ -381,25 +317,23 @@ public static partial class Program
                     }
                     Console.ResetColor();
                 }
-                
+
                 return failCount > 0 ? 1 : 0;
             }
             else
             {
-                // Specific asset mode
                 return ProcessSingleAsset(dbpf, assetName, registryDir, outputDir, verbose);
             }
         }
-        
-        // No specific asset requested - just show info
+
         Console.WriteLine($"DBPF: {Path.GetFileName(dbpfPath)}");
         Console.WriteLine($"Entries: {dbpf.Entries.Count}");
         Console.WriteLine("Use -l to list assets, or -a <n> to parse a specific asset.");
         Console.WriteLine("Use -a random:Type to parse a random asset of that type.");
         return 0;
     }
-    
-    private static int ProcessSingleAsset(DbpfReader dbpf, string assetName, 
+
+    private static int ProcessSingleAsset(DbpfReader dbpf, string assetName,
         string? registryDir, string? outputDir, bool verbose)
     {
         var data = dbpf.GetAsset(assetName);
@@ -408,10 +342,9 @@ public static partial class Program
             Console.Error.WriteLine($"Error: Asset not found: {assetName}");
             return 1;
         }
-        
-        // Parse asset name to get type
+
         var (baseName, typeName) = ParseAssetName(assetName);
-        
+
         if (string.IsNullOrEmpty(typeName))
         {
             Console.Error.WriteLine($"Error: Cannot determine asset type from name: {assetName}");
@@ -419,40 +352,51 @@ public static partial class Program
             Console.Error.WriteLine($"       Or for catalog files: 'catalog_131.bin' or 'catalog_131'");
             return 1;
         }
-        
+
         var service = new AssetService();
+
+        if (verbose)
+        {
+            var reg = service.Parser.Registry;
+            var issues = service.Parser.RegistryIssues;
+            Console.ForegroundColor = issues.Count == 0 ? ConsoleColor.DarkGray : ConsoleColor.DarkRed;
+            Console.WriteLine($"    Registry: {reg.Count} types, {issues.Count} unresolved ref(s)");
+            foreach (var issue in issues)
+                Console.WriteLine($"      - {issue}");
+            Console.ResetColor();
+        }
+
         var fileType = service.GetFileType(typeName);
-        
+
         if (fileType == null)
         {
             Console.Error.WriteLine($"Error: Unknown asset type: {typeName}");
             return 1;
         }
-        
+
         var root = service.Parser.Parse(data, fileType.RootStruct, fileType.HeaderSize);
-        
+
         if (verbose)
             PrintTree(root, 0);
-        
-        // Output XML if requested
+
         if (!string.IsNullOrEmpty(outputDir))
         {
             Directory.CreateDirectory(outputDir);
             var outputPath = Path.Combine(outputDir, baseName + ".xml");
-            
+
             var xml = AssetSerializer.ToXml(root);
             var settings = new XmlWriterSettings { Indent = true };
             using var writer = XmlWriter.Create(outputPath, settings);
             xml.WriteTo(writer);
-            
+
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"    {assetName} -> {Path.GetFileName(outputPath)}");
             Console.ResetColor();
         }
-        
+
         return 0;
     }
-    
+
     private static int HandleSingleFile(string inputPath, string? outputDir, bool outputXml, bool verbose)
     {
         if (!File.Exists(inputPath))
@@ -460,161 +404,163 @@ public static partial class Program
             Console.Error.WriteLine($"Error: File not found: {inputPath}");
             return 1;
         }
-        
+
         var service = new AssetService();
         var root = service.LoadFile(inputPath);
-        
+
         if (verbose || !outputXml)
             PrintTree(root, 0);
-        
+
         if (outputXml || !string.IsNullOrEmpty(outputDir))
         {
             var xml = AssetSerializer.ToXml(root);
-            
+
             if (!string.IsNullOrEmpty(outputDir))
             {
                 Directory.CreateDirectory(outputDir);
-                var outputPath = Path.Combine(outputDir, 
+                var outputPath = Path.Combine(outputDir,
                     Path.GetFileNameWithoutExtension(inputPath) + ".xml");
-                
+
                 var settings = new XmlWriterSettings { Indent = true };
                 using var writer = XmlWriter.Create(outputPath, settings);
                 xml.WriteTo(writer);
-                
+
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine($"Written: {outputPath}");
                 Console.ResetColor();
             }
             else
             {
-                // Output to stdout
                 var settings = new XmlWriterSettings { Indent = true };
                 using var writer = XmlWriter.Create(Console.Out, settings);
                 xml.WriteTo(writer);
             }
         }
-        
+
         return 0;
     }
-    
-    /// <summary>
-    /// Renders tree with syntax highlighting.
-    /// </summary>
-    private static void PrintTree(AssetNode node, int indent)
+
+    /// <summary>Renders the L1 tree with syntax highlighting.</summary>
+    private static void PrintTree(AssetValue node, int indent)
     {
-        // 1. Ocultar completamente campos Nullables vazios para limpar o log
-        if (node is NullNode) return;
+        if (node is NullValue) return;
 
         var prefix = new string(' ', indent * 2);
         Console.Write(prefix);
 
-        // --- Determinar o Nome Exato do Tipo ---
         string typeLabel = node.Kind.ToString();
-
         switch (node)
         {
-            case NumberNode n:
-                // Ex: Int32, UInt32, Float, HashId
-                typeLabel = n.OriginalType.ToString(); 
-                break;
-            case VectorNode v:
-                // Ex: Vector3, Vector2, Orientation
-                typeLabel = v.VectorType.ToString(); 
-                break;
-            case BooleanNode:
-                typeLabel = "Bool";
-                break;
-            // Asset, Struct, Enum, String, Array usam o Kind padrão
+            case NumberValue n: typeLabel = n.OriginalType.ToString(); break;
+            case VectorValue v: typeLabel = v.VectorType.ToString(); break;
+            case BoolValue: typeLabel = "Bool"; break;
         }
 
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.Write(typeLabel);
-        
+
         Console.ForegroundColor = ConsoleColor.DarkGray;
         Console.Write(".");
-        
+
         Console.ForegroundColor = ConsoleColor.White;
         Console.Write(node.Name);
-        
-        // --- Valor (Início) ---
+
         Console.ForegroundColor = ConsoleColor.DarkGray;
         Console.Write("(");
-        
-        // --- Renderização do Valor ---
-        if (node is VectorNode vec)
+
+        if (node is VectorValue vec)
         {
-             PrintVector(vec);
+            PrintVector(vec);
         }
         else
         {
             switch (node)
             {
-                case StringNode sn:
-                    Console.ForegroundColor = ConsoleColor.Green; 
+                case StringValue sn:
+                    Console.ForegroundColor = sn.Kind == AssetValueKind.Asset
+                        ? ConsoleColor.Green
+                        : ConsoleColor.Green;
                     Console.Write(sn.Value);
                     break;
-                case NumberNode nn:
-                    if (nn.Format == NumberFormat.Hex)
-                        Console.ForegroundColor = ConsoleColor.Blue;
-                    else
-                        Console.ForegroundColor = ConsoleColor.Magenta;
-                    
-                    Console.Write(nn.DisplayValue);
+                case LocalizedStringValue l:
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.Write(string.IsNullOrEmpty(l.SecondaryValue)
+                        ? l.PrimaryValue
+                        : $"{l.PrimaryValue} [{l.SecondaryValue}]");
                     break;
-                case BooleanNode bn:
+                case NumberValue nn:
+                    Console.ForegroundColor = nn.Format == NumberFormat.Hex
+                        ? ConsoleColor.Blue
+                        : ConsoleColor.Magenta;
+                    Console.Write(FormatNumber(nn));
+                    break;
+                case BoolValue bn:
                     Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.Write(bn.DisplayValue);
+                    Console.Write(bn.Value ? "true" : "false");
                     break;
-                case EnumNode en:
-                    Console.ForegroundColor = ConsoleColor.Blue; 
-                    Console.Write(en.DisplayValue);
+                case EnumValue en:
+                    Console.ForegroundColor = ConsoleColor.Blue;
+                    Console.Write(string.IsNullOrEmpty(en.ResolvedName)
+                        ? $"0x{en.RawValue:X8}"
+                        : $"{en.ResolvedName} (0x{en.RawValue:X8})");
                     break;
-                case ArrayNode an:
-                    Console.ForegroundColor = ConsoleColor.DarkYellow; 
+                case ArrayValue an:
+                    Console.ForegroundColor = ConsoleColor.DarkYellow;
                     Console.Write(an.Children.Count);
                     break;
-                case StructNode sn:
-                    Console.ForegroundColor = ConsoleColor.DarkCyan; 
-                    Console.Write(sn.TypeName);
-                    break;
-                case AssetNode an when an.Kind == AssetNodeKind.Asset:
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.Write(an.DisplayValue);
+                case StructValue sv:
+                    Console.ForegroundColor = ConsoleColor.DarkCyan;
+                    Console.Write(sv.TypeName);
                     break;
                 default:
                     Console.ForegroundColor = ConsoleColor.Gray;
-                    Console.Write(node.DisplayValue);
                     break;
             }
         }
-        
+
         Console.ForegroundColor = ConsoleColor.DarkGray;
         Console.Write(")");
         Console.ResetColor();
         Console.WriteLine();
-        
-        // Recursão para filhos
+
         foreach (var child in node.Children)
             PrintTree(child, indent + 1);
     }
 
-    /// <summary>
-    /// Helper to print styled vector components (X=Red, Y=Green, Z=Blue)
-    /// </summary>
-    private static void PrintVector(VectorNode vec)
+    private static string FormatNumber(NumberValue n) => n.Format switch
+    {
+        NumberFormat.Hex => n.OriginalType switch
+        {
+            NumericType.UInt8 => $"0x{(byte)n.Value:X2}",
+            NumericType.UInt16 => $"0x{(ushort)n.Value:X4}",
+            NumericType.UInt32 or NumericType.HashId or NumericType.ObjId => $"0x{(uint)n.Value:X8}",
+            NumericType.UInt64 => $"0x{(ulong)n.Value:X16}",
+            _ => $"0x{(long)n.Value:X}"
+        },
+        NumberFormat.Float => n.Value.ToString("G9", CultureInfo.InvariantCulture),
+        _ => n.OriginalType switch
+        {
+            NumericType.Float => n.Value.ToString("G9", CultureInfo.InvariantCulture),
+            NumericType.Int64 => ((long)n.Value).ToString(CultureInfo.InvariantCulture),
+            NumericType.UInt64 => ((ulong)n.Value).ToString(CultureInfo.InvariantCulture),
+            NumericType.UInt8 => ((byte)n.Value).ToString(CultureInfo.InvariantCulture),
+            NumericType.UInt16 => ((ushort)n.Value).ToString(CultureInfo.InvariantCulture),
+            _ => ((int)n.Value).ToString(CultureInfo.InvariantCulture)
+        }
+    };
+
+    private static void PrintVector(VectorValue vec)
     {
         string fmt = "0.######";
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        var ci = CultureInfo.InvariantCulture;
 
         void PrintComp(string label, float val, ConsoleColor color, bool comma = true)
         {
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.Write(label);
             Console.Write(": ");
-
             Console.ForegroundColor = color;
             Console.Write(val.ToString(fmt, ci));
-            
             if (comma)
             {
                 Console.ForegroundColor = ConsoleColor.DarkGray;
@@ -642,7 +588,7 @@ public static partial class Program
                 break;
         }
     }
-    
+
     private static void PrintUsage()
     {
         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -650,7 +596,7 @@ public static partial class Program
         Console.ForegroundColor = ConsoleColor.Gray;
         Console.WriteLine("Darkspore Binary Asset Parser\n");
         Console.ResetColor();
-        
+
         Console.WriteLine(@"Usage:
   AssetData.Parser <file>                     Parse single asset file
   AssetData.Parser -d <package> [options]     Parse from DBPF package
@@ -677,7 +623,7 @@ DBPF Package Options:
   --seed <n>          Random seed for reproducible selection
 
 Examples:");
-        
+
         Console.ForegroundColor = ConsoleColor.DarkGray;
         Console.WriteLine("  # Parse single file");
         Console.WriteLine("  AssetData.Parser creature.noun --xml -o output/");

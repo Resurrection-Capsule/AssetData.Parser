@@ -23,6 +23,9 @@ public sealed class DbpfReader : IDisposable
     private readonly BinaryReader _reader;
     private readonly bool _isDBBF;
     private readonly List<DbpfEntry> _entries = new();
+    // Hash-bucket indices (mirror the client's AssetCache lookup; replace O(n) scans).
+    private readonly Dictionary<ResourceKey, DbpfEntry> _byKey = new();
+    private readonly Dictionary<uint, List<DbpfEntry>> _byInstance = new();
     private readonly NameRegistry _typeRegistry = new();
     private readonly NameRegistry _fileRegistry = new();
     private readonly NameRegistry _projectRegistry = new();
@@ -81,8 +84,15 @@ public sealed class DbpfReader : IDisposable
         {
             var entry = ReadEntry(sharedTypeId, sharedGroupId);
             _entries.Add(entry);
+
+            // Build lookup indices in entry order (first-wins on duplicate keys, matching
+            // the previous linear-scan behavior which returned the first match).
+            _byKey.TryAdd(entry.Key, entry);
+            if (!_byInstance.TryGetValue(entry.Key.InstanceId, out var bucket))
+                _byInstance[entry.Key.InstanceId] = bucket = new List<DbpfEntry>();
+            bucket.Add(entry);
         }
-        
+
         // Try to load internal names
         LoadInternalNames();
     }
@@ -179,14 +189,7 @@ public sealed class DbpfReader : IDisposable
     /// Get asset by resource key.
     /// </summary>
     public byte[]? GetAsset(ResourceKey key)
-    {
-        foreach (var entry in _entries)
-        {
-            if (entry.Key == key)
-                return ReadEntry(entry);
-        }
-        return null;
-    }
+        => _byKey.TryGetValue(key, out var entry) ? ReadEntry(entry) : null;
     
     /// <summary>
     /// Read and decompress entry data.
@@ -234,24 +237,19 @@ public sealed class DbpfReader : IDisposable
             tHash = _typeRegistry.GetHash(ftype) ?? ParseOrHash(ftype);
         }
         
-        // Search with type match first
+        if (!_byInstance.TryGetValue(fHash, out var bucket))
+            return default;
+
+        // Prefer an exact type match (entry order preserved), else fall back to the
+        // first entry for this instance — same result as the old two-pass linear scan.
         if (tHash.HasValue)
         {
-            foreach (var entry in _entries)
-            {
-                if (entry.Key.InstanceId == fHash && entry.Key.TypeId == tHash.Value)
+            foreach (var entry in bucket)
+                if (entry.Key.TypeId == tHash.Value)
                     return entry.Key;
-            }
         }
-        
-        // Search by instance only
-        foreach (var entry in _entries)
-        {
-            if (entry.Key.InstanceId == fHash)
-                return entry.Key;
-        }
-        
-        return default;
+
+        return bucket[0].Key;
     }
     
     /// <summary>
@@ -298,17 +296,9 @@ public sealed class DbpfReader : IDisposable
         _stream.Dispose();
     }
     
-    // FNV-1a hash (case-insensitive)
-    public static uint FnvHash(string s)
-    {
-        uint hash = 0x811C9DC5;
-        foreach (char c in s.ToLowerInvariant())
-        {
-            hash *= 0x1000193;
-            hash ^= (byte)c;
-        }
-        return hash;
-    }
+    // FNV hash (case-insensitive). Delegates to the single shared implementation; kept as a
+    // public entry point for NameRegistry and external callers.
+    public static uint FnvHash(string s) => WireHash.Fnv1a(s);
     
     private static uint ParseOrHash(string s)
     {
