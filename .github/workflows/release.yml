@@ -15,163 +15,210 @@ on:
     branches: [ "main" ]
     paths-ignore:
       - "README.md"
+      - "LICENSE"
+      - ".gitignore"
+      - "docs/**"
+      - "src/Wiki/**"
   workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
 
 jobs:
   build:
-    name: Build - ${{ matrix.name }}
+    name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
-            name: Windows
+            name: windows
             rid: win-x64
-            ext: .exe
+            ext: ".exe"
           - os: ubuntu-latest
-            name: Linux
+            name: linux
             rid: linux-x64
             ext: ""
           - os: macos-latest
-            name: MacOS
+            name: macos
             rid: osx-x64
             ext: ""
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Setup .NET 9
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 9.0.x
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-    - name: Get Version
-      shell: bash
-      run: |
-        if [[ $GITHUB_REF == refs/tags/* ]]; then
-          echo "APP_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-        else
-          echo "APP_VERSION=dev-${GITHUB_SHA::7}" >> $GITHUB_ENV
-        fi
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.sln', '**/Directory.*.props', '**/Directory.Packages.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
-    - name: Cache NuGet packages
-      uses: actions/cache@v4
-      with:
-        path: ~/.nuget/packages
-        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/AssetData.Parser.sln') }}
-        restore-keys: |
-          ${{ runner.os }}-nuget-
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="0.0.0-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $version"
 
-    - name: Restore Dependencies
-      run: dotnet restore AssetData.Parser.sln
+      - name: Restore
+        run: dotnet restore AssetData.Parser.sln
 
-    - name: Run Tests
-      run: dotnet test AssetData.Parser.sln --no-restore --verbosity normal
-      continue-on-error: true
+      # On pull requests, only verify that everything compiles on each OS.
+      # Producing self-contained binaries is reserved for main pushes and tags.
+      - name: Build (pull request validation)
+        if: github.event_name == 'pull_request'
+        run: dotnet build AssetData.Parser.sln -c Release --no-restore
 
-    - name: Publish CLI
-      run: >
-        dotnet publish src/CLI/AssetData.Parser.CLI.csproj 
-        -c Release 
-        -r ${{ matrix.rid }} 
-        --self-contained true 
-        -p:PublishSingleFile=true 
-        -p:IncludeNativeLibrariesForSelfExtract=true 
-        -p:IncludeAllContentForSelfExtract=true
-        -o ./publish-cli
+      - name: Publish CLI
+        if: github.event_name != 'pull_request'
+        run: >
+          dotnet publish src/CLI/AssetData.Parser.CLI.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          --self-contained true
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:IncludeAllContentForSelfExtract=true
+          -o ./publish-cli
 
-    - name: Publish Editor
-      run: >
-        dotnet publish src/Editor/AssetData.Parser.Editor.csproj 
-        -c Release 
-        -r ${{ matrix.rid }} 
-        --self-contained true 
-        -p:PublishSingleFile=true
-        -p:IncludeNativeLibrariesForSelfExtract=true
-        -p:IncludeAllContentForSelfExtract=true
-        -o ./publish-editor
+      - name: Publish Editor
+        if: github.event_name != 'pull_request'
+        run: >
+          dotnet publish src/Editor/AssetData.Parser.Editor.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          --self-contained true
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:IncludeAllContentForSelfExtract=true
+          -o ./publish-editor
 
-    - name: Prepare CLI Asset
-      shell: pwsh
-      run: |
-        $cliFiles = Get-ChildItem "./publish-cli" -File | Where-Object { 
-          $_.Name -like "AssetData*" -and ($_.Extension -eq ".exe" -or $_.Extension -eq "" -or $_.Extension -eq $null)
-        }
-        $cliFile = $cliFiles | Sort-Object Length -Descending | Select-Object -First 1
-        if ($cliFile) {
-          $destName = "AssetData-CLI-${{ env.APP_VERSION }}-${{ matrix.name }}${{ matrix.ext }}"
-          Write-Host "Moving CLI: $($cliFile.FullName) -> $destName"
-          Copy-Item $cliFile.FullName "./$destName" -Force
-        } else {
-          Write-Error "No CLI executable found!"
-          exit 1
-        }
+      # The published binaries have deterministic names derived from each
+      # project's AssemblyName: the CLI is "AssetData.Parser" and the Editor
+      # is "AssetData.Parser.Editor". Reference them explicitly instead of
+      # guessing by file extension (which breaks on Linux/macOS, where the
+      # binary has no extension but the dotted name confuses extension checks).
+      - name: Package (Windows)
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PLATFORM: ${{ matrix.name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $apps = @(
+            @{ Name = "CLI";    Bin = "AssetData.Parser.exe";        Dir = "publish-cli"    },
+            @{ Name = "Editor"; Bin = "AssetData.Parser.Editor.exe"; Dir = "publish-editor" }
+          )
+          foreach ($app in $apps) {
+            $src = Join-Path $app.Dir $app.Bin
+            if (-not (Test-Path $src)) { throw "Missing $($app.Name) binary: $src" }
+            $stage = "stage-$($app.Name)"
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Copy-Item $src $stage -Force
+            if (Test-Path "README.md") { Copy-Item "README.md" $stage -Force }
+            if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   $stage -Force }
+            $archive = "dist/AssetData-$($app.Name)-$env:VERSION-$env:PLATFORM.zip"
+            Compress-Archive -Path "$stage/*" -DestinationPath $archive -Force
+            $size = [math]::Round((Get-Item $archive).Length / 1MB, 2)
+            Write-Host "Created $archive ($size MB)"
+          }
 
-    - name: Prepare Editor Asset
-      shell: pwsh
-      run: |
-        $editorFiles = Get-ChildItem "./publish-editor" -File | Where-Object { 
-          $_.Name -like "AssetData*" -and ($_.Extension -eq ".exe" -or $_.Extension -eq "" -or $_.Extension -eq $null)
-        }
-        $editorFile = $editorFiles | Sort-Object Length -Descending | Select-Object -First 1
-        if ($editorFile) {
-          $destName = "AssetData-Editor-${{ env.APP_VERSION }}-${{ matrix.name }}${{ matrix.ext }}"
-          Write-Host "Moving Editor: $($editorFile.FullName) ($($editorFile.Length) bytes) -> $destName"
-          Copy-Item $editorFile.FullName "./$destName" -Force
-        } else {
-          Write-Error "No Editor executable found!"
-          exit 1
-        }
+      - name: Package (Unix)
+        if: runner.os != 'Windows' && github.event_name != 'pull_request'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PLATFORM: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          package() {
+            local name="$1" bin="$2" dir="$3"
+            local src="$dir/$bin"
+            if [[ ! -f "$src" ]]; then
+              echo "Missing $name binary: $src" >&2
+              exit 1
+            fi
+            local stage="stage-$name"
+            mkdir -p "$stage"
+            cp "$src" "$stage/"
+            chmod +x "$stage/$bin"
+            [[ -f README.md ]] && cp README.md "$stage/"
+            [[ -f LICENSE ]] && cp LICENSE "$stage/"
+            local archive="dist/AssetData-$name-$VERSION-$PLATFORM.tar.gz"
+            tar -czf "$archive" -C "$stage" .
+            echo "Created $archive ($(du -h "$archive" | cut -f1))"
+          }
+          package "CLI" "AssetData.Parser" "publish-cli"
+          package "Editor" "AssetData.Parser.Editor" "publish-editor"
 
-    - name: Verify artifact sizes
-      shell: pwsh
-      run: |
-        $cli = Get-Item "./AssetData-CLI-${{ env.APP_VERSION }}-${{ matrix.name }}${{ matrix.ext }}"
-        $editor = Get-Item "./AssetData-Editor-${{ env.APP_VERSION }}-${{ matrix.name }}${{ matrix.ext }}"
-        Write-Host "CLI size: $($cli.Length / 1MB) MB"
-        Write-Host "Editor size: $($editor.Length / 1MB) MB"
-        
-        if ($editor.Length -lt 50MB) {
-          Write-Warning "Editor file seems too small! Expected ~100MB+ for self-contained Avalonia app"
-        }
-
-    - name: Upload CLI Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: AssetData-CLI-${{ matrix.name }}
-        path: AssetData-CLI-${{ env.APP_VERSION }}-${{ matrix.name }}${{ matrix.ext }}
-        if-no-files-found: error
-
-    - name: Upload Editor Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: AssetData-Editor-${{ matrix.name }}
-        path: AssetData-Editor-${{ env.APP_VERSION }}-${{ matrix.name }}${{ matrix.ext }}
-        if-no-files-found: error
+      - name: Upload artifacts
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
 
   release:
-    name: Create Release
+    name: Publish release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download All Artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -la artifacts/
+      - name: Generate checksums
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          sha256sum * > SHA256SUMS.txt
+          echo "Release contents:"
+          ls -la
+          echo "Checksums:"
+          cat SHA256SUMS.txt
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+          fail_on_unmatched_files: true

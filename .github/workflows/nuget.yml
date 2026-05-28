@@ -3,40 +3,84 @@ name: Publish NuGet Package
 on:
   push:
     tags:
-      - "v*.*.*" # Push events to matching v*, i.e. v1.0, v20.15.10
-  workflow_dispatch: # Enable running manually from the Actions tab
+      - "v*.*.*" # Semantic version tags, e.g. v1.0.0, v20.15.10
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: nuget-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  PROJECT: src/Core/AssetData.Parser.csproj
 
 jobs:
-  build_and_publish:
+  publish:
+    name: Pack and publish
     runs-on: ubuntu-latest
+    # Exposed so the NuGet.org push can be skipped when the secret is absent.
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x' # Ensure this matches your TargetFramework
-          source-url: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json # We configure both to allow public or private
-        env:
-          NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Restore dependencies
-        run: dotnet restore ./src/Core/AssetData.Parser.csproj
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="1.0.0-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $version"
 
-      - name: Build
-        run: dotnet build ./src/Core/AssetData.Parser.csproj --configuration Release --no-restore
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT }}
 
       - name: Pack
-        run: dotnet pack ./src/Core/AssetData.Parser.csproj --configuration Release --no-build --output nupkgs
+        run: >
+          dotnet pack ${{ env.PROJECT }}
+          -c Release
+          --no-restore
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:ContinuousIntegrationBuild=true
+          -o nupkgs
 
-      # Option 1: Publish to NuGet.org
-      # Run this step if NUGET_API_KEY is configured in repository secrets
-      - name: Push to NuGet.org
-        run: dotnet nuget push nupkgs/*.nupkg -k ${{ secrets.NUGET_API_KEY }} -s https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: Publish to NuGet.org
+        if: env.NUGET_API_KEY != ''
+        run: >
+          dotnet nuget push "nupkgs/*.nupkg"
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
 
-      # Option 2: Publish to GitHub Packages
-      # Run this step to publish to GitHub Packages (requires repository GITHUB_TOKEN which is automatically provided)
-      - name: Push to GitHub Packages
-        run: dotnet nuget push nupkgs/*.nupkg -k ${{ secrets.GITHUB_TOKEN }} -s https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json --skip-duplicate
+      - name: Publish to GitHub Packages
+        run: >
+          dotnet nuget push "nupkgs/*.nupkg"
+          --api-key ${{ secrets.GITHUB_TOKEN }}
+          --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          --skip-duplicate
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: nupkgs/*.nupkg
+          if-no-files-found: error
+          retention-days: 14
