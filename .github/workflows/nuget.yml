@@ -53,11 +53,23 @@ jobs:
       - name: Restore
         run: dotnet restore ${{ env.PROJECT }}
 
+      # Build explicitly before packing. The Core project sets
+      # GeneratePackageOnBuild=true, so "pack --no-restore" without a prior
+      # build leaves the assembly unbuilt and fails with NU5026. Build first,
+      # then pack with --no-build, passing the same version to both.
+      - name: Build
+        run: >
+          dotnet build ${{ env.PROJECT }}
+          -c Release
+          --no-restore
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:ContinuousIntegrationBuild=true
+
       - name: Pack
         run: >
           dotnet pack ${{ env.PROJECT }}
           -c Release
-          --no-restore
+          --no-build
           -p:Version=${{ steps.version.outputs.version }}
           -p:ContinuousIntegrationBuild=true
           -o nupkgs
