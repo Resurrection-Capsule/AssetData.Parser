@@ -7,4 +7,38 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- Org build standard (see Resurrection-Capsule/.github/templates). Versioning via MinVer
+       from the nearest `vX.Y.Z` tag — no static <Version>. -->
+  <PropertyGroup>
+    <Authors>JeanxPereira</Authors>
+    <Company>Resurrection-Capsule</Company>
+    <Product>ReCap</Product>
+    <Copyright>Copyright (c) JeanxPereira</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Resurrection-Capsule/AssetData.Parser</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>embedded</DebugType>
+    <IncludeSymbols>false</IncludeSymbols>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="Exists('$(MSBuildThisFileDirectory)README.md')">
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)README.md')">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
+  </ItemGroup>
+
 </Project>

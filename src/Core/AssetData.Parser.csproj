@@ -6,13 +6,11 @@
     <AssemblyName>AssetData.Parser.Core</AssemblyName>
     <RootNamespace>AssetData.Parser</RootNamespace>
 
-    <!-- NuGet Package Properties -->
+    <!-- NuGet Package Properties (version via MinVer; metadata via Directory.Build.props) -->
+    <IsPackable>true</IsPackable>
     <PackageId>AssetData.Parser.Core</PackageId>
-    <Version>1.0.0</Version>
-    <Authors>JeanxPereira</Authors>
-    <Description>Library for parsing AssetData.</Description>
-    <RepositoryUrl>https://github.com/JeanxPereira/AssetData.Parser</RepositoryUrl>
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <Description>Library for parsing Darkspore AssetData (.package / DBPF) binary assets, used by the ReCap server.</Description>
+    <PackageTags>darkspore;dbpf;assetdata;parser;recap;binary</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
